@@ -51,6 +51,7 @@ public partial class MainWindow : Window
         RestorePlacement();
         ApplySortGlyph();
         SetupTray();
+        InitPanel();
 
         _timer.Interval = TimeSpan.FromMilliseconds(Math.Clamp(_settings.IntervalMs, 250, 10000));
         _timer.Tick += (_, _) => Tick();
@@ -112,31 +113,37 @@ public partial class MainWindow : Window
             else g.Aggregate();
         }
 
+        RecordHistories(snap.Sys);
         UpdateTiles(snap.Sys);
         CheckCommit(snap.Sys);
         CheckWatches();
         if (!_paused) RebuildView();
         UpdateDetails();
+        UpdatePanel();
         StatusLeft.Text = $"{_procs.Count} processes · {snap.Sys.Threads:N0} threads · {snap.Sys.Handles:N0} handles" +
                           (_paused ? " · PAUSED" : $" · updates every {_timer.Interval.TotalSeconds:0.#} s");
         UpdateTrayText(snap.Sys);
     }
 
-    void UpdateTiles(SystemSample s)
+    void UpdateTiles(SystemSample s, bool record = true)
     {
-        _cpuHist.Add(s.Cpu);
+        if (record)
+        {
+            _cpuHist.Add(s.Cpu);
+            _memHist.Add(s.PhysTotal > 0 ? (s.PhysTotal - s.PhysAvail) * 100.0 / s.PhysTotal : 0);
+            _commitHist.Add(s.CommitLimit > 0 ? (s.CommitLimit - s.CommitAvail) * 100.0 / s.CommitLimit : 0);
+            _gpuHist.Add(s.Gpu);
+            _diskHist.Add(s.Disk);
+        }
         CpuValue.Text = Fmt.Pct(s.Cpu);
         CpuSub.Text = $"{Environment.ProcessorCount} logical processors";
 
         double physUsed = s.PhysTotal - s.PhysAvail;
         double memPct = s.PhysTotal > 0 ? physUsed * 100 / s.PhysTotal : 0;
-        _memHist.Add(memPct);
         MemValue.Text = $"{physUsed / GB:0.0} / {s.PhysTotal / GB:0} GB";
         MemSub.Text = $"{memPct:0}% in use · {Fmt.Gb(s.PhysAvail)} available";
 
         double commitUsed = s.CommitLimit - s.CommitAvail;
-        double commitPct = s.CommitLimit > 0 ? commitUsed * 100 / s.CommitLimit : 0;
-        _commitHist.Add(commitPct);
         CommitValue.Text = $"{commitUsed / GB:0.0} / {s.CommitLimit / GB:0} GB";
         CommitSub.Text = $"{Fmt.Gb(s.CommitAvail)} free · warn under {_settings.CommitWarnGB:0.#} GB";
         bool low = s.CommitAvail / GB < _settings.CommitWarnGB;
@@ -153,7 +160,6 @@ public partial class MainWindow : Window
             CommitSpark.Stroke = new SolidColorBrush(Color.FromRgb(0xE8, 0xA3, 0x3D));
         }
 
-        _gpuHist.Add(s.Gpu);
         if (s.GpuAvailable)
         {
             GpuValue.Text = Fmt.Pct(s.Gpu);
@@ -161,8 +167,19 @@ public partial class MainWindow : Window
         }
         else { GpuValue.Text = "n/a"; GpuSub.Text = "GPU counters unavailable"; }
 
-        _diskHist.Add(s.Disk);
         DiskValue.Text = Fmt.Rate(s.Disk);
+        DiskSub.Text = s.Disks.Count > 0 ? $"{s.Disks.Count} disk{(s.Disks.Count == 1 ? "" : "s")} · busiest {s.Disks.Max(d => d.Active):0}% active"
+                                         : "read + write, all processes";
+        if (s.Gpus.Count > 1) GpuSub.Text = $"{s.Gpus.Count} GPUs · {Fmt.Bytes(s.GpuMem)} dedicated in use";
+
+        // The open tile gets an accent outline (the commit tile stays red while memory is low).
+        var accent = TryFindResource("AccentFillColorDefaultBrush") as Brush ?? Brushes.DodgerBlue;
+        foreach (var tile in new[] { CpuTile, MemTile, CommitTile, GpuTile, DiskTile })
+        {
+            if (tile == CommitTile && low) continue;
+            if ((string)tile.Tag == _settings.OpenPanel) tile.BorderBrush = accent;
+            else tile.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
+        }
 
         CpuSpark.Refresh(); MemSpark.Refresh(); CommitSpark.Refresh(); GpuSpark.Refresh(); DiskSpark.Refresh();
     }
@@ -249,7 +266,7 @@ public partial class MainWindow : Window
             "ImageName" => string.Compare(a.ImageName, b.ImageName, StringComparison.OrdinalIgnoreCase),
             "Pid" => a.PidSort.CompareTo(b.PidSort),
             "Status" => a.Suspended.CompareTo(b.Suspended),
-            "Cpu" => a.Cpu.CompareTo(b.Cpu),
+            "Cpu" or "Cores" => a.Cpu.CompareTo(b.Cpu),
             "Private" => a.Private.CompareTo(b.Private),
             "WorkingSet" => a.WorkingSet.CompareTo(b.WorkingSet),
             "Disk" => a.Disk.CompareTo(b.Disk),
@@ -283,6 +300,7 @@ public partial class MainWindow : Window
             {
                 top.Indent = 0;
                 desired.Add(top);
+                if (top is GroupRow tg) tg.ShowGlyph(tg.IsExpanded || _search.Length > 0);
                 if (top is GroupRow g && (g.IsExpanded || _search.Length > 0))
                 {
                     kids.Sort(Compare);
@@ -324,6 +342,7 @@ public partial class MainWindow : Window
     {
         if (ProcGrid.SelectedItem is not Row r)
         {
+            _selAffinity = _sysAffinity = 0;
             DetailsEmpty.Visibility = Visibility.Visible;
             DetailsBody.Visibility = Visibility.Collapsed;
             return;
@@ -348,6 +367,7 @@ public partial class MainWindow : Window
             DCmd.Text = "Expand the group to see each process's command line.";
         }
         DPath.ToolTip = DPath.Text;
+        UpdateCpuUse(r);
         DCpu.Data = r.CpuHist; DMem.Data = r.MemHist;
         DCpu.Refresh(); DMem.Refresh();
         DCpuVal.Text = r.CpuText; DMemVal.Text = r.PrivateText;

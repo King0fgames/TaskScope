@@ -27,6 +27,10 @@ internal static unsafe class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetProcessTimes(IntPtr h, out long create, out long exit, out long kernel, out long user);
     [DllImport("kernel32.dll")] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetProcessAffinityMask(IntPtr h, out UIntPtr processMask, out UIntPtr systemMask);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetLogicalProcessorInformationEx(int relationship, IntPtr buffer, ref uint length);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORYSTATUSEX

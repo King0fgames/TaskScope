@@ -34,6 +34,7 @@ public sealed class RingBuffer
 public abstract class Row : INotifyPropertyChanged
 {
     public static double MemScale = 16.0 * (1L << 30);
+    public static int CpuCount = Environment.ProcessorCount;
     public event PropertyChangedEventHandler? PropertyChanged;
     protected void Changed(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     protected bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
@@ -60,14 +61,17 @@ public abstract class Row : INotifyPropertyChanged
     // Raw values (sorting uses these)
     public double Cpu, Disk, Gpu;
     public long Private, WorkingSet, GpuMem;
-    public int Threads, Handles;
+    public int Threads, Handles, BusyThreads;
     public bool Suspended;
+    /// <summary>CPU use expressed in cores, e.g. 2.7 = as busy as 2.7 logical processors.</summary>
+    public double Cores => Cpu * CpuCount / 100.0;
     public readonly RingBuffer CpuHist = new(120), MemHist = new(120);
 
     // Display values (bound in the grid)
-    string _cpuT = "", _privT = "", _wsT = "", _diskT = "", _gpuT = "", _gpuMemT = "", _thrT = "", _hndT = "", _status = "";
+    string _coresT = "", _cpuT = "", _privT = "", _wsT = "", _diskT = "", _gpuT = "", _gpuMemT = "", _thrT = "", _hndT = "", _status = "";
     Brush? _cpuH, _memH, _diskH, _gpuH;
     public string CpuText { get => _cpuT; private set => Set(ref _cpuT, value); }
+    public string CoresText { get => _coresT; private set => Set(ref _coresT, value); }
     public string PrivateText { get => _privT; private set => Set(ref _privT, value); }
     public string WorkingSetText { get => _wsT; private set => Set(ref _wsT, value); }
     public string DiskText { get => _diskT; private set => Set(ref _diskT, value); }
@@ -84,6 +88,7 @@ public abstract class Row : INotifyPropertyChanged
     protected void Publish()
     {
         CpuText = Fmt.Pct(Cpu);
+        CoresText = Cores < 0.05 ? "0" : Cores < 10 ? $"{Cores:0.0}" : $"{Cores:0}";
         PrivateText = Fmt.Bytes(Private);
         WorkingSetText = Fmt.Bytes(WorkingSet);
         DiskText = Fmt.Rate(Disk);
@@ -111,6 +116,7 @@ public sealed class ProcRow : Row
     public string CommandLine { get; }
     public string Description { get; }
     public DateTime? Started { get; }
+    public Dictionary<string, double>? GpuByAdapter { get; private set; }
     public GroupRow? Group;
     public long LastTick;
 
@@ -137,6 +143,7 @@ public sealed class ProcRow : Row
         Cpu = s.Cpu; Disk = s.Disk; Gpu = s.Gpu; GpuMem = s.GpuMem;
         Private = r.PrivateBytes; WorkingSet = r.WorkingSet;
         Threads = r.Threads; Handles = r.Handles; Suspended = r.Suspended;
+        BusyThreads = s.BusyThreads; GpuByAdapter = s.GpuByAdapter;
         ParentPid = r.ParentPid; BasePriority = r.BasePriority;
         Publish();
     }
@@ -145,6 +152,7 @@ public sealed class ProcRow : Row
 public sealed class GroupRow : Row
 {
     public List<ProcRow> Children { get; } = new();
+    public Dictionary<string, double>? GpuByAdapter { get; private set; }
     long _minPid;
     bool _expanded;
 
@@ -158,8 +166,11 @@ public sealed class GroupRow : Row
     public bool IsExpanded
     {
         get => _expanded;
-        set { if (Set(ref _expanded, value)) ExpandGlyph = value ? "" : ""; }
+        set { if (Set(ref _expanded, value)) ShowGlyph(value); }
     }
+
+    /// <summary>Points the arrow down whenever the children are listed (expanded, or shown by a search).</summary>
+    public void ShowGlyph(bool open) => ExpandGlyph = open ? "" : "";
 
     public override bool IsGroup => true;
     public override long PidSort => _minPid;
@@ -168,7 +179,7 @@ public sealed class GroupRow : Row
 
     public void Aggregate()
     {
-        Cpu = Disk = Gpu = 0; Private = WorkingSet = GpuMem = 0; Threads = Handles = 0;
+        Cpu = Disk = Gpu = 0; Private = WorkingSet = GpuMem = 0; Threads = Handles = BusyThreads = 0;
         _minPid = long.MaxValue;
         bool allSuspended = Children.Count > 0;
         string? desc = null;
@@ -176,13 +187,18 @@ public sealed class GroupRow : Row
         {
             Cpu += c.Cpu; Disk += c.Disk; Gpu += c.Gpu;
             Private += c.Private; WorkingSet += c.WorkingSet; GpuMem += c.GpuMem;
-            Threads += c.Threads; Handles += c.Handles;
+            Threads += c.Threads; Handles += c.Handles; BusyThreads += c.BusyThreads;
             allSuspended &= c.Suspended;
             _minPid = Math.Min(_minPid, c.Pid);
             if (desc == null && !string.IsNullOrWhiteSpace(c.Description)) desc = c.Description;
             Icon ??= c.Icon;
         }
         Cpu = Math.Min(100, Cpu); Gpu = Math.Min(100, Gpu);
+        GpuByAdapter = null;
+        foreach (var c in Children)
+            if (c.GpuByAdapter != null)
+                foreach (var (luid, v) in c.GpuByAdapter)
+                    (GpuByAdapter ??= new())[luid] = Math.Min(100, GpuByAdapter.GetValueOrDefault(luid) + v);
         Suspended = allSuspended;
         Name = desc ?? ImageName;
         CountText = $"({Children.Count})";

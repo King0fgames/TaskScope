@@ -9,65 +9,6 @@ using System.Windows.Media.Imaging;
 
 namespace TaskScope;
 
-/// <summary>A lightweight history graph that draws a RingBuffer.</summary>
-public sealed class Sparkline : FrameworkElement
-{
-    public static readonly DependencyProperty StrokeProperty = DependencyProperty.Register(
-        nameof(Stroke), typeof(Brush), typeof(Sparkline),
-        new FrameworkPropertyMetadata(Brushes.DodgerBlue, FrameworkPropertyMetadataOptions.AffectsRender));
-
-    public Brush Stroke { get => (Brush)GetValue(StrokeProperty); set => SetValue(StrokeProperty, value); }
-
-    RingBuffer? _data;
-    public RingBuffer? Data { get => _data; set { _data = value; InvalidateVisual(); } }
-    /// <summary>Fixed top of the scale (e.g. 100 for percentages); 0 = auto-scale.</summary>
-    public double FixedMax { get; set; }
-    /// <summary>Smallest top of the scale when auto-scaling, so idle noise stays flat.</summary>
-    public double MinMax { get; set; } = 1;
-
-    public void Refresh() => InvalidateVisual();
-
-    protected override void OnRender(DrawingContext dc)
-    {
-        double w = ActualWidth, h = ActualHeight;
-        if (w < 4 || h < 4) return;
-        dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h));
-        var d = _data;
-        if (d == null || d.Count < 2) return;
-
-        double max = FixedMax > 0 ? FixedMax : Math.Max(d.Max() * 1.1, MinMax);
-        double step = w / (d.Capacity - 1);
-        double x0 = w - (d.Count - 1) * step;
-        Point P(int i) => new(x0 + i * step, h - 1 - Math.Clamp(d[i] / max, 0, 1) * (h - 2));
-
-        var line = new StreamGeometry();
-        using (var c = line.Open())
-        {
-            c.BeginFigure(P(0), false, false);
-            for (int i = 1; i < d.Count; i++) c.LineTo(P(i), true, true);
-        }
-        line.Freeze();
-        var fill = new StreamGeometry();
-        using (var c = fill.Open())
-        {
-            c.BeginFigure(new Point(x0, h), true, true);
-            for (int i = 0; i < d.Count; i++) c.LineTo(P(i), false, false);
-            c.LineTo(new Point(w, h), false, false);
-        }
-        fill.Freeze();
-
-        var stroke = Stroke;
-        Brush fillBrush = stroke;
-        if (stroke is SolidColorBrush sb)
-        {
-            fillBrush = new SolidColorBrush(Color.FromArgb(0x38, sb.Color.R, sb.Color.G, sb.Color.B));
-            fillBrush.Freeze();
-        }
-        dc.DrawGeometry(fillBrush, null, fill);
-        dc.DrawGeometry(null, new Pen(stroke, 1.5) { LineJoin = PenLineJoin.Round }, line);
-    }
-}
-
 /// <summary>Small shell icons for executables, cached by path.</summary>
 public static class IconCache
 {

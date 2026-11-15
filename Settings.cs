@@ -25,6 +25,11 @@ public sealed class Settings
     public int IntervalMs { get; set; } = 1000;
     public bool GroupByApp { get; set; } = true;
     public bool AlwaysOnTop { get; set; }
+    public bool StackedGraphs { get; set; }
+    /// <summary>Which tile's detail panel is open: cpu, mem, commit, gpu, disk, or null.</summary>
+    public string? OpenPanel { get; set; }
+    public string CpuView { get; set; } = "threads";
+    public string GpuView { get; set; } = "overall";
     public string SortKey { get; set; } = "Private";
     public bool SortDesc { get; set; } = true;
     public List<WatchRule> Watches { get; set; } = new();

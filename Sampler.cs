@@ -14,6 +14,9 @@ public sealed class RawProc
     public long CreateTime, CpuTime, PrivateBytes, WorkingSet, IoBytes;
     public string Name = "";
     public bool Suspended;
+    /// <summary>Per-thread id and total CPU time (100 ns units), used to count busy threads.</summary>
+    public int[] ThreadIds = Array.Empty<int>();
+    public long[] ThreadTimes = Array.Empty<long>();
 }
 
 public sealed class ProcInfo
@@ -28,6 +31,23 @@ public sealed class ProcSample
     public ProcInfo Info = null!;
     public double Cpu, Disk, Gpu;
     public long GpuMem;
+    /// <summary>Threads that used at least ~0.5% of one core since the last sample.</summary>
+    public int BusyThreads;
+    /// <summary>GPU % per adapter (LUID key), only for processes using a GPU.</summary>
+    public Dictionary<string, double>? GpuByAdapter;
+}
+
+public sealed class DiskSample
+{
+    public string Name = "";
+    public double Read, Write, Active;
+}
+
+public sealed class GpuAdapterSample
+{
+    public string Luid = "", Name = "";
+    public double Util;
+    public long DedicatedUsed, DedicatedTotal;
 }
 
 public sealed class SystemSample
@@ -37,6 +57,10 @@ public sealed class SystemSample
     public long GpuMem;
     public ulong PhysTotal, PhysAvail, CommitLimit, CommitAvail;
     public int Threads, Handles;
+    /// <summary>Per logical processor: busy % and the kernel-mode part of it.</summary>
+    public double[]? CoreBusy, CoreKernel;
+    public List<DiskSample> Disks = new();
+    public List<GpuAdapterSample> Gpus = new();
 }
 
 public sealed class Snapshot
@@ -48,7 +72,7 @@ public sealed class Snapshot
 /// <summary>Takes one snapshot of every process using a single NtQuerySystemInformation call.</summary>
 public sealed unsafe class Sampler : IDisposable
 {
-    const int SystemProcessInformation = 5;
+    const int SystemProcessInformation = 5, SystemProcessorPerformanceInformation = 8;
     const int STATUS_INFO_LENGTH_MISMATCH = unchecked((int)0xC0000004);
 
     IntPtr _buf = IntPtr.Zero;
@@ -57,9 +81,12 @@ public sealed unsafe class Sampler : IDisposable
     TimeSpan _lastAt;
     long _lastIdle, _lastKernel, _lastUser;
     Dictionary<ProcKey, (long cpu, long io)> _prev = new();
+    Dictionary<int, long> _prevThreads = new();
+    long[]? _coreIdle, _coreKernel, _coreUser;
     readonly Dictionary<ProcKey, ProcInfo> _info = new();
     readonly Dictionary<string, string> _descByPath = new(StringComparer.OrdinalIgnoreCase);
     readonly GpuSampler _gpu = new();
+    readonly DiskSampler _disk = new();
     readonly int _cpuCount = Environment.ProcessorCount;
 
     public Snapshot Sample()
@@ -81,12 +108,17 @@ public sealed unsafe class Sampler : IDisposable
             if (_lastKernel != 0 && dk + du > 0) sys.Cpu = Math.Clamp(100.0 * (dk + du - di) / (dk + du), 0, 100);
             _lastIdle = idle; _lastKernel = kernel; _lastUser = user;
         }
+        SampleCores(sys);
         var mem = Native.MemoryStatus();
         sys.PhysTotal = mem.ullTotalPhys; sys.PhysAvail = mem.ullAvailPhys;
         sys.CommitLimit = mem.ullTotalPageFile; sys.CommitAvail = mem.ullAvailPageFile;
         sys.GpuAvailable = gpu.Available; sys.Gpu = gpu.Total; sys.GpuMem = gpu.TotalMem;
+        sys.Gpus = gpu.Adapters;
+        sys.Disks = _disk.Sample();
 
         var next = new Dictionary<ProcKey, (long, long)>(raws.Count);
+        var nextThreads = new Dictionary<int, long>(_prevThreads.Count + 256);
+        double busyThreshold = dt * 1e7 * 0.005; // 0.5% of one core
         var alive = new HashSet<ProcKey>();
         foreach (var r in raws)
         {
@@ -101,16 +133,50 @@ public sealed unsafe class Sampler : IDisposable
                 s.Disk = Math.Max(0, (r.IoBytes - p.io) / dt);
             }
             next[key] = (r.CpuTime, r.IoBytes);
+            for (int i = 0; i < r.ThreadIds.Length; i++)
+            {
+                int tid = r.ThreadIds[i]; long t = r.ThreadTimes[i];
+                if (havePrev && _prevThreads.TryGetValue(tid, out long pt) && t - pt >= busyThreshold) s.BusyThreads++;
+                nextThreads[tid] = t;
+            }
             if (gpu.PerPid.TryGetValue(r.Pid, out var g)) { s.Gpu = Math.Min(100, g.util); s.GpuMem = g.mem; }
+            gpu.PerPidAdapter.TryGetValue(r.Pid, out s.GpuByAdapter);
             if (!_info.TryGetValue(key, out var info)) _info[key] = info = LoadInfo(r);
             s.Info = info;
             sys.Disk += s.Disk;
             snap.Procs.Add(s);
         }
         _prev = next;
+        _prevThreads = nextThreads;
         if (_info.Count > alive.Count + 64)
             foreach (var k in new List<ProcKey>(_info.Keys)) if (!alive.Contains(k)) _info.Remove(k);
         return snap;
+    }
+
+    void SampleCores(SystemSample sys)
+    {
+        // SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION is 48 bytes: Idle, Kernel (includes idle), User, Dpc, Interrupt, count.
+        int n = Math.Min(_cpuCount, 64);
+        int size = 48 * n;
+        byte* b = stackalloc byte[size];
+        if (Native.NtQuerySystemInformation(SystemProcessorPerformanceInformation, (IntPtr)b, size, out int ret) != 0) return;
+        n = ret / 48;
+        bool have = _coreIdle != null && _coreIdle.Length == n;
+        var idle = new long[n]; var kern = new long[n]; var user = new long[n];
+        var busy = new double[n]; var kbusy = new double[n];
+        for (int i = 0; i < n; i++)
+        {
+            byte* e = b + i * 48;
+            idle[i] = *(long*)e; kern[i] = *(long*)(e + 8); user[i] = *(long*)(e + 16);
+            if (!have) continue;
+            long di = idle[i] - _coreIdle![i], dk = kern[i] - _coreKernel![i], du = user[i] - _coreUser![i];
+            long total = dk + du;
+            if (total <= 0) continue;
+            busy[i] = Math.Clamp(100.0 * (total - di) / total, 0, 100);
+            kbusy[i] = Math.Clamp(100.0 * (dk - di) / total, 0, busy[i]);
+        }
+        _coreIdle = idle; _coreKernel = kern; _coreUser = user;
+        if (have) { sys.CoreBusy = busy; sys.CoreKernel = kbusy; }
     }
 
     List<RawProc> QueryProcesses()
@@ -155,12 +221,16 @@ public sealed unsafe class Sampler : IDisposable
             r.Name = nameLen > 0 && nameBuf != IntPtr.Zero ? new string((char*)nameBuf, 0, nameLen / 2)
                    : r.Pid == 0 ? "System Idle Process" : "System";
 
-            // Suspended = every thread is Waiting (5) with WaitReason Suspended (5)
+            // Threads: CPU time per thread, and Suspended = every thread Waiting (5) with WaitReason Suspended (5)
             bool allSuspended = threads > 0;
+            r.ThreadIds = new int[threads];
+            r.ThreadTimes = new long[threads];
             byte* t = p + 0x100;
             for (int i = 0; i < threads; i++, t += 0x50)
             {
-                if (*(uint*)(t + 68) != 5 || *(uint*)(t + 72) != 5) { allSuspended = false; break; }
+                r.ThreadTimes[i] = *(long*)t + *(long*)(t + 8);
+                r.ThreadIds[i] = (int)*(long*)(t + 48); // ClientId.UniqueThread
+                if (*(uint*)(t + 68) != 5 || *(uint*)(t + 72) != 5) allSuspended = false;
             }
             r.Suspended = allSuspended && r.Pid > 4;
             list.Add(r);
@@ -216,12 +286,47 @@ public sealed unsafe class Sampler : IDisposable
     public void Dispose()
     {
         _gpu.Dispose();
+        _disk.Dispose();
         if (_buf != IntPtr.Zero) { Marshal.FreeHGlobal(_buf); _buf = IntPtr.Zero; }
     }
 }
 
-/// <summary>Per-process GPU usage from the "GPU Engine" and "GPU Process Memory" performance counters.</summary>
-public sealed unsafe class GpuSampler : IDisposable
+/// <summary>Small helper for reading wildcard performance counters.</summary>
+internal static unsafe class Pdh
+{
+    public const uint FMT_LARGE = 0x400, FMT_DOUBLE = 0x200, FMT_NOCAP100 = 0x8000;
+    const int PDH_MORE_DATA = unchecked((int)0x800007D2);
+
+    public static IntPtr Open() =>
+        Native.PdhOpenQueryW(null, IntPtr.Zero, out IntPtr q) == 0 ? q : IntPtr.Zero;
+
+    public static IntPtr Add(IntPtr q, string path) =>
+        q != IntPtr.Zero && Native.PdhAddEnglishCounterW(q, path, IntPtr.Zero, out IntPtr c) == 0 ? c : IntPtr.Zero;
+
+    public static void Read(IntPtr counter, uint fmt, Action<string, double, long> each)
+    {
+        if (counter == IntPtr.Zero) return;
+        uint size = 0;
+        int st = Native.PdhGetFormattedCounterArrayW(counter, fmt, ref size, out uint count, IntPtr.Zero);
+        if (st != PDH_MORE_DATA || size == 0) return;
+        IntPtr buf = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            if (Native.PdhGetFormattedCounterArrayW(counter, fmt, ref size, out count, buf) != 0) return;
+            // PDH_FMT_COUNTERVALUE_ITEM_W: { LPWSTR name; DWORD CStatus; (pad); union { double; long } } = 24 bytes
+            for (int i = 0; i < count; i++)
+            {
+                byte* item = (byte*)buf + i * 24;
+                if (*(uint*)(item + 8) > 1) continue; // not valid / new data
+                each(new string(*(char**)item), *(double*)(item + 16), *(long*)(item + 16));
+            }
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+}
+
+/// <summary>Per-process and per-adapter GPU usage from the GPU performance counters.</summary>
+public sealed class GpuSampler : IDisposable
 {
     public sealed class Result
     {
@@ -229,20 +334,25 @@ public sealed unsafe class GpuSampler : IDisposable
         public double Total;
         public long TotalMem;
         public Dictionary<int, (double util, long mem)> PerPid = new();
+        public Dictionary<int, Dictionary<string, double>> PerPidAdapter = new();
+        public List<GpuAdapterSample> Adapters = new();
     }
 
-    const uint PDH_FMT_LARGE = 0x400, PDH_FMT_DOUBLE = 0x200, PDH_FMT_NOCAP100 = 0x8000;
-    const int PDH_MORE_DATA = unchecked((int)0x800007D2);
-    IntPtr _q, _eng, _mem;
+    IntPtr _q;
+    readonly IntPtr _eng, _mem, _adapterMem;
     readonly bool _ok;
+    readonly Dictionary<string, (string name, long dedicated)> _names;
 
     public GpuSampler()
     {
+        _names = GpuNames.Load();
         try
         {
-            if (Native.PdhOpenQueryW(null, IntPtr.Zero, out _q) != 0) return;
-            if (Native.PdhAddEnglishCounterW(_q, @"\GPU Engine(*)\Utilization Percentage", IntPtr.Zero, out _eng) != 0) return;
-            Native.PdhAddEnglishCounterW(_q, @"\GPU Process Memory(*)\Dedicated Usage", IntPtr.Zero, out _mem);
+            _q = Pdh.Open();
+            _eng = Pdh.Add(_q, @"\GPU Engine(*)\Utilization Percentage");
+            if (_eng == IntPtr.Zero) return;
+            _mem = Pdh.Add(_q, @"\GPU Process Memory(*)\Dedicated Usage");
+            _adapterMem = Pdh.Add(_q, @"\GPU Adapter Memory(*)\Dedicated Usage");
             Native.PdhCollectQueryData(_q);
             _ok = true;
         }
@@ -255,71 +365,251 @@ public sealed unsafe class GpuSampler : IDisposable
         if (!_ok || Native.PdhCollectQueryData(_q) != 0) return res;
         res.Available = true;
 
-        // Sum per (pid, engine), then a process's GPU% is its busiest engine (like Task Manager).
+        // An engine is "luid_<adapter>_phys_N_eng_N_engtype_X". A GPU's usage is its busiest engine
+        // (like Task Manager); a process's usage on a GPU is its busiest engine there.
         var perEngine = new Dictionary<string, double>();
+        var adapterOf = new Dictionary<string, string>();
         var perPidEngine = new Dictionary<(int, string), double>();
-        Read(_eng, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, (name, d, _) =>
+        Pdh.Read(_eng, Pdh.FMT_DOUBLE | Pdh.FMT_NOCAP100, (name, d, _) =>
         {
             int pid = ParsePid(name);
-            int luid = name.IndexOf("_luid_", StringComparison.Ordinal);
-            string eng = luid >= 0 ? name[(luid + 6)..] : name;
+            string? luid = ParseLuid(name);
+            if (luid == null) return;
+            int at = name.IndexOf("luid_", StringComparison.Ordinal);
+            string eng = name[(at + 5)..];
             int hash = eng.IndexOf('#'); if (hash >= 0) eng = eng[..hash];
             perEngine[eng] = perEngine.GetValueOrDefault(eng) + d;
+            adapterOf[eng] = luid;
             if (pid > 0) perPidEngine[(pid, eng)] = perPidEngine.GetValueOrDefault((pid, eng)) + d;
         });
-        foreach (var v in perEngine.Values) res.Total = Math.Max(res.Total, v);
-        res.Total = Math.Min(100, res.Total);
-        foreach (var ((pid, _), v) in perPidEngine)
+
+        var adapters = new Dictionary<string, GpuAdapterSample>();
+        GpuAdapterSample Adapter(string luid)
+        {
+            if (!adapters.TryGetValue(luid, out var a))
+            {
+                var known = _names.TryGetValue(luid, out var n);
+                adapters[luid] = a = new GpuAdapterSample
+                {
+                    Luid = luid,
+                    Name = known ? n.name : "GPU " + luid,
+                    DedicatedTotal = known ? n.dedicated : 0,
+                };
+            }
+            return a;
+        }
+
+        foreach (var (eng, v) in perEngine)
+        {
+            var a = Adapter(adapterOf[eng]);
+            a.Util = Math.Min(100, Math.Max(a.Util, v));
+            res.Total = Math.Min(100, Math.Max(res.Total, v));
+        }
+        foreach (var ((pid, eng), v) in perPidEngine)
         {
             var cur = res.PerPid.GetValueOrDefault(pid);
             res.PerPid[pid] = (Math.Max(cur.util, v), cur.mem);
+            if (v <= 0) continue;
+            if (!res.PerPidAdapter.TryGetValue(pid, out var byAdapter)) res.PerPidAdapter[pid] = byAdapter = new();
+            string luid = adapterOf[eng];
+            byAdapter[luid] = Math.Min(100, Math.Max(byAdapter.GetValueOrDefault(luid), v));
         }
-        if (_mem != IntPtr.Zero)
-            Read(_mem, PDH_FMT_LARGE, (name, _, l) =>
+        Pdh.Read(_mem, Pdh.FMT_LARGE, (name, _, l) =>
+        {
+            int pid = ParsePid(name);
+            res.TotalMem += l;
+            if (pid > 0)
             {
-                int pid = ParsePid(name);
-                res.TotalMem += l;
-                if (pid > 0)
-                {
-                    var cur = res.PerPid.GetValueOrDefault(pid);
-                    res.PerPid[pid] = (cur.util, cur.mem + l);
-                }
-            });
+                var cur = res.PerPid.GetValueOrDefault(pid);
+                res.PerPid[pid] = (cur.util, cur.mem + l);
+            }
+        });
+        Pdh.Read(_adapterMem, Pdh.FMT_LARGE, (name, _, l) =>
+        {
+            if (ParseLuid(name) is { } luid) Adapter(luid).DedicatedUsed += l;
+        });
+
+        // Show real GPUs only (those DirectX reports), unless DirectX told us nothing.
+        foreach (var a in adapters.Values)
+            if (_names.Count == 0 || _names.ContainsKey(a.Luid)) res.Adapters.Add(a);
+        res.Adapters.Sort((x, y) => string.CompareOrdinal(x.Luid, y.Luid));
         return res;
     }
 
     static int ParsePid(string name)
     {
-        // "pid_1234_luid_0x..._phys_0_eng_0_engtype_3D"
         if (!name.StartsWith("pid_", StringComparison.Ordinal)) return 0;
         int end = name.IndexOf('_', 4);
         return end > 4 && int.TryParse(name.AsSpan(4, end - 4), out int pid) ? pid : 0;
     }
 
-    static void Read(IntPtr counter, uint fmt, Action<string, double, long> each)
+    /// <summary>"..._luid_0x00000000_0x0000D1B5_phys_0..." → "0x00000000_0x0000D1B5"</summary>
+    static string? ParseLuid(string name)
     {
-        uint size = 0;
-        int st = Native.PdhGetFormattedCounterArrayW(counter, fmt, ref size, out uint count, IntPtr.Zero);
-        if (st != PDH_MORE_DATA || size == 0) return;
-        IntPtr buf = Marshal.AllocHGlobal((int)size);
-        try
-        {
-            if (Native.PdhGetFormattedCounterArrayW(counter, fmt, ref size, out count, buf) != 0) return;
-            // PDH_FMT_COUNTERVALUE_ITEM_W: { LPWSTR name; DWORD CStatus; (pad); union { double; long } } = 24 bytes
-            for (int i = 0; i < count; i++)
-            {
-                byte* item = (byte*)buf + i * 24;
-                uint status = *(uint*)(item + 8);
-                if (status > 1) continue;
-                string name = new string(*(char**)item);
-                each(name, *(double*)(item + 16), *(long*)(item + 16));
-            }
-        }
-        finally { Marshal.FreeHGlobal(buf); }
+        int at = name.IndexOf("luid_", StringComparison.Ordinal);
+        if (at < 0 || name.Length < at + 5 + 21) return null;
+        return name.Substring(at + 5, 21).ToUpperInvariant().Replace("0X", "0x");
     }
 
     public void Dispose()
     {
         if (_q != IntPtr.Zero) { Native.PdhCloseQuery(_q); _q = IntPtr.Zero; }
+    }
+}
+
+/// <summary>GPU names and memory sizes from DXGI, keyed by the same LUID text the counters use.</summary>
+internal static unsafe class GpuNames
+{
+    [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(in Guid riid, out IntPtr factory);
+
+    public static Dictionary<string, (string name, long dedicated)> Load()
+    {
+        var map = new Dictionary<string, (string, long)>();
+        try
+        {
+            var iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"); // IDXGIFactory1
+            if (CreateDXGIFactory1(in iid, out IntPtr factory) != 0 || factory == IntPtr.Zero) return map;
+            var fv = *(IntPtr**)factory;
+            var enumAdapters1 = (delegate* unmanaged<IntPtr, uint, IntPtr*, int>)fv[12];
+            for (uint i = 0; ; i++)
+            {
+                IntPtr adapter;
+                if (enumAdapters1(factory, i, &adapter) != 0) break;
+                var av = *(IntPtr**)adapter;
+                var getDesc1 = (delegate* unmanaged<IntPtr, byte*, int>)av[10];
+                byte* d = stackalloc byte[320];
+                if (getDesc1(adapter, d) == 0)
+                {
+                    uint flags = *(uint*)(d + 304);
+                    if ((flags & 2) == 0) // skip software adapters (Microsoft Basic Render Driver)
+                    {
+                        string name = new string((char*)d).Trim();
+                        long dedicated = (long)*(ulong*)(d + 272);
+                        uint low = *(uint*)(d + 296); int high = *(int*)(d + 300);
+                        map[$"0x{high:X8}_0x{low:X8}"] = (name, dedicated);
+                    }
+                }
+                ((delegate* unmanaged<IntPtr, uint>)av[2])(adapter); // Release
+            }
+            ((delegate* unmanaged<IntPtr, uint>)fv[2])(factory);
+        }
+        catch { /* no DXGI: fall back to counter names */ }
+        return map;
+    }
+}
+
+/// <summary>Per physical disk throughput and active time from the PhysicalDisk counters.</summary>
+public sealed class DiskSampler : IDisposable
+{
+    IntPtr _q;
+    readonly IntPtr _read, _write, _idle;
+
+    public DiskSampler()
+    {
+        try
+        {
+            _q = Pdh.Open();
+            _read = Pdh.Add(_q, @"\PhysicalDisk(*)\Disk Read Bytes/sec");
+            _write = Pdh.Add(_q, @"\PhysicalDisk(*)\Disk Write Bytes/sec");
+            _idle = Pdh.Add(_q, @"\PhysicalDisk(*)\% Idle Time");
+            if (_q != IntPtr.Zero) Native.PdhCollectQueryData(_q);
+        }
+        catch { _q = IntPtr.Zero; }
+    }
+
+    public List<DiskSample> Sample()
+    {
+        var list = new List<DiskSample>();
+        if (_q == IntPtr.Zero || Native.PdhCollectQueryData(_q) != 0) return list;
+        var byName = new Dictionary<string, DiskSample>();
+        DiskSample Get(string inst)
+        {
+            if (!byName.TryGetValue(inst, out var d))
+            {
+                // "0 C:" → "Disk 0 (C:)"; "2" → "Disk 2"
+                var parts = inst.Split(' ', 2);
+                string name = "Disk " + parts[0] + (parts.Length > 1 ? $" ({parts[1].Trim()})" : "");
+                byName[inst] = d = new DiskSample { Name = name, Active = 0 };
+            }
+            return d;
+        }
+        Pdh.Read(_read, Pdh.FMT_DOUBLE, (n, v, _) => { if (n != "_Total") Get(n).Read = v; });
+        Pdh.Read(_write, Pdh.FMT_DOUBLE, (n, v, _) => { if (n != "_Total") Get(n).Write = v; });
+        Pdh.Read(_idle, Pdh.FMT_DOUBLE | Pdh.FMT_NOCAP100, (n, v, _) => { if (n != "_Total") Get(n).Active = Math.Clamp(100 - v, 0, 100); });
+        list.AddRange(byName.Values);
+        static int Num(DiskSample d) => int.TryParse(d.Name.AsSpan(5).ToString().Split(' ')[0], out int n) ? n : 999;
+        list.Sort((a, b) => Num(a).CompareTo(Num(b)));
+        return list;
+    }
+
+    public void Dispose()
+    {
+        if (_q != IntPtr.Zero) { Native.PdhCloseQuery(_q); _q = IntPtr.Zero; }
+    }
+}
+
+/// <summary>Which logical processors belong to which physical core, and whether a core is a P- or E-core.</summary>
+public sealed unsafe class CpuTopology
+{
+    public int[] CoreOfLogical = Array.Empty<int>();
+    public List<int[]> CoreThreads = new();
+    public List<bool> CoreIsEfficiency = new();
+    public bool Hybrid;
+
+    public static CpuTopology Load(int logicalCount)
+    {
+        var t = new CpuTopology { CoreOfLogical = new int[logicalCount] };
+        for (int i = 0; i < logicalCount; i++) t.CoreOfLogical[i] = -1;
+        var effs = new List<byte>();
+        try
+        {
+            uint len = 0;
+            Native.GetLogicalProcessorInformationEx(0, IntPtr.Zero, ref len); // RelationProcessorCore
+            if (len > 0)
+            {
+                IntPtr buf = Marshal.AllocHGlobal((int)len);
+                try
+                {
+                    if (Native.GetLogicalProcessorInformationEx(0, buf, ref len))
+                    {
+                        byte* p = (byte*)buf, end = p + len;
+                        while (p < end)
+                        {
+                            int size = *(int*)(p + 4);
+                            byte eff = *(p + 9);
+                            ushort groups = *(ushort*)(p + 30);
+                            var threads = new List<int>();
+                            for (int g = 0; g < groups; g++)
+                            {
+                                ulong mask = *(ulong*)(p + 32 + g * 16);
+                                ushort group = *(ushort*)(p + 40 + g * 16);
+                                if (group != 0) continue;
+                                for (int bit = 0; bit < 64; bit++)
+                                    if ((mask & (1UL << bit)) != 0 && bit < logicalCount) threads.Add(bit);
+                            }
+                            if (threads.Count > 0)
+                            {
+                                foreach (int l in threads) t.CoreOfLogical[l] = t.CoreThreads.Count;
+                                t.CoreThreads.Add(threads.ToArray());
+                                effs.Add(eff);
+                            }
+                            if (size <= 0) break;
+                            p += size;
+                        }
+                    }
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        catch { }
+
+        if (t.CoreThreads.Count == 0) // fall back: one "core" per logical processor
+            for (int i = 0; i < logicalCount; i++) { t.CoreOfLogical[i] = i; t.CoreThreads.Add(new[] { i }); effs.Add(0); }
+
+        byte max = 0, min = 255;
+        foreach (var e in effs) { max = Math.Max(max, e); min = Math.Min(min, e); }
+        t.Hybrid = max != min;
+        foreach (var e in effs) t.CoreIsEfficiency.Add(t.Hybrid && e < max);
+        return t;
     }
 }
