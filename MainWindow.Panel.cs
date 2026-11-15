@@ -78,7 +78,8 @@ public partial class MainWindow
                 string kind = core >= 0 && _topology.Hybrid ? (_topology.CoreIsEfficiency[core] ? " (E-core)" : " (P-core)") : "";
                 _threadCells.Add(new ChartCell($"t{i}", new StackedHistory(60, "User", "Kernel"))
                 {
-                    FixedMax = 100, Stroke = CpuBlue, Label = $"CPU {i}",
+                    FixedMax = 100, Stroke = CpuBlue,
+                    Label = $"CPU {i}" + (core >= 0 && _topology.Hybrid ? (_topology.CoreIsEfficiency[core] ? " · E" : " · P") : ""),
                     Tip = $"Logical processor {i}" + (core >= 0 ? $" · core {core}{kind}" : ""),
                 });
             }
