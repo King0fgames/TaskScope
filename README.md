@@ -4,6 +4,8 @@ A faster, more informative replacement for Windows Task Manager, built to stop m
 
 Windows can run out of **commit** (memory that programs have reserved, backed by RAM + the page file) long before RAM looks full. When it does, programs and drivers crash. Task Manager barely shows this, so TaskScope puts it front and center and gives you ways to act before it's too late.
 
+![TaskScope main window: usage tiles with history, process list grouped by app, and the details pane for the selected app](docs/screenshot.png)
+
 ## Features
 
 **Memory safety**
