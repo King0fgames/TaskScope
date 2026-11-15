@@ -30,6 +30,12 @@ internal static unsafe class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetProcessAffinityMask(IntPtr h, out UIntPtr processMask, out UIntPtr systemMask);
     [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetProcessAffinityMask(IntPtr h, UIntPtr processMask);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetProcessGroupAffinity(IntPtr h, ref ushort groupCount, [Out] ushort[] groups);
+    [DllImport("kernel32.dll")] public static extern ushort GetActiveProcessorGroupCount();
+    [DllImport("kernel32.dll")] public static extern uint GetActiveProcessorCount(ushort group);
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetLogicalProcessorInformationEx(int relationship, IntPtr buffer, ref uint length);
 
     [StructLayout(LayoutKind.Sequential)]

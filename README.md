@@ -12,6 +12,7 @@ Windows can run out of **commit** (memory that programs have reserved, backed by
 - **Commit tile**: committed memory vs. the commit limit, with history. It turns red, shows a banner listing the biggest processes, and sends a Windows notification when free commit drops below a threshold you choose (default 16 GB).
 - **Pause (suspend) / Resume**: freeze a runaway process so it stops growing without losing its work, then resume it when there's room.
 - **Memory watches**: rules like *"if `java.exe` goes over 20 GB, notify me / pause it / end it."* Create one from the right-click menu (**Watch memory…**) or in Settings.
+- **Set affinity…** (right-click menu, or **Change…** in the details pane) picks which logical processors a process, or every process in a group, may run on. Checkboxes are grouped by physical core and marked P/E on hybrid CPUs, with shortcuts for P-cores only, E-cores only, and one thread per core. On PCs with more than 64 logical processors, affinity is set within the process's processor group.
 
 **Detail panels and graphs** (click any tile)
 - **CPU**: *Overall*, *Cores* (physical cores, marked **P**/**E** on hybrid Intel CPUs), or *Threads* (one graph per logical processor). If the selected process is limited to certain CPUs (affinity), those CPUs are outlined.
@@ -26,11 +27,11 @@ Windows can run out of **commit** (memory that programs have reserved, backed by
 - **Cores** column: CPU use expressed in cores (2.5 = as busy as two and a half logical processors). The details pane adds how many of the process's threads are actually busy and which CPUs it may run on.
 - Columns: CPU, committed memory, RAM (working set), disk I/O, GPU %, GPU memory, threads, handles, and a **Suspended** status (detected from thread wait states).
 - Search by name, PID, path, **or command line**, so you can tell your `python.exe` processes apart.
-- A details pane with path, full command line, parent process, start time, priority, and 2-minute CPU and memory graphs.
+- A details pane with path, full command line, parent process, start time, priority, CPU affinity (with a **Change…** link), and 2-minute CPU and memory graphs.
 - Heat shading on busy cells, and live tiles for CPU, RAM, commit, GPU and disk.
 
 **Actions**
-- End task, End process tree, Pause/Resume, Set priority, Open file location, and copy name/PID/path/command line.
+- End task, End process tree, Pause/Resume, Set priority, **Set affinity…**, Open file location, and copy name/PID/path/command line.
 - Warns before you end or pause critical Windows processes.
 - Protects against PID reuse: every action checks the process creation time first.
 - **Run as admin** button for controlling elevated and system processes.
@@ -79,7 +80,8 @@ Settings (warning threshold, update speed, memory watches, window position) are 
 | `Charts.cs` | Graph control (line or stacked), per-app stacked history, chart palette |
 | `MainWindow.Panel.cs` | Detail panel: CPU cores/threads, per-GPU, per-disk, legends, affinity |
 | `Models.cs` | Row view models (process and app group), formatting, heat shading |
-| `Actions.cs` | End, suspend/resume (`NtSuspendProcess`), and priority, all guarded against PID reuse |
+| `Actions.cs` | End, suspend/resume (`NtSuspendProcess`), priority, and CPU affinity (processor-group aware), all guarded against PID reuse |
+| `AffinityWindow.xaml(.cs)` | *Set affinity* dialog: one checkbox per logical processor, grouped by physical core, with All / None / P-cores / E-cores / One per core shortcuts |
 | `MainWindow.xaml(.cs)` | UI, list reconciliation (keeps selection and scroll position across updates), alerts, tray |
 | `SettingsWindow.xaml(.cs)` | Threshold, update speed, memory watch rules |
 | `Ui.cs` | Sparkline graph control and icon helpers |

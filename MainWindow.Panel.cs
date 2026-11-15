@@ -322,38 +322,51 @@ public partial class MainWindow
         _selAffinity = _sysAffinity = 0;
         if (r is ProcRow p)
         {
-            string allowed = "";
-            IntPtr h = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, p.Pid);
-            if (h != IntPtr.Zero)
+            DCpuUse.Text = $"Using {p.Cores:0.0} cores ({Fmt.Pct(p.Cpu)}) · {p.BusyThreads} of {p.Threads} threads busy";
+            SetAffinityLink("Change…");
+            try
             {
-                if (Native.GetProcessAffinityMask(h, out var pm, out var sm))
-                {
-                    _selAffinity = (ulong)pm; _sysAffinity = (ulong)sm;
-                    allowed = _selAffinity == _sysAffinity
-                        ? " · may run on any logical processor"
-                        : $" · limited to CPU {Ranges(_selAffinity)}";
-                }
-                Native.CloseHandle(h);
+                var a = Actions.GetAffinity(p);
+                // The core/thread cells only cover group 0, so only outline them for processes there.
+                if (a.Group == 0) { _selAffinity = a.Mask; _sysAffinity = a.GroupMask; }
+                string group = Affinity.GroupCount > 1 ? $" in processor group {a.Group}" : "";
+                DAffinityText.Text = a.MultiGroup && !a.Restricted ? "Affinity: may run on processors in more than one group "
+                    : !a.Restricted ? $"Affinity: may run on any logical processor{group} "
+                    : $"Affinity: limited to CPU {Affinity.Ranges(a.Mask, a.Offset)}" +
+                      $" ({Affinity.Count(a.Mask)} of {Affinity.Count(a.GroupMask)}{DescribeCores(a)}){group} ";
             }
-            DCpuUse.Text = $"Using {p.Cores:0.0} cores ({Fmt.Pct(p.Cpu)}) · {p.BusyThreads} of {p.Threads} threads busy{allowed}";
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                DAffinityText.Text = "Affinity: can't read it" + (_elevated ? " " : " (run as admin to see more) ");
+            }
         }
         else if (r is GroupRow g)
         {
             DCpuUse.Text = $"Using {g.Cores:0.0} cores ({Fmt.Pct(g.Cpu)}) · {g.BusyThreads} of {g.Threads} threads busy across {g.Children.Count} processes";
+            DAffinityText.Text = "Affinity: set per process ";
+            SetAffinityLink($"Set for all {g.Children.Count}…");
         }
     }
 
-    static string Ranges(ulong mask)
+    string _affinityLink = "Change…";
+    void SetAffinityLink(string text)
     {
-        var parts = new List<string>();
-        for (int i = 0; i < 64; i++)
+        if (text == _affinityLink) return; // rebuilding the inline every tick would reset its hover state
+        _affinityLink = text;
+        DAffinityLink.Inlines.Clear();
+        DAffinityLink.Inlines.Add(text);
+    }
+
+    /// <summary>", P-cores only" style note for hybrid CPUs, so an E-core-only limit is obvious.</summary>
+    string DescribeCores(Affinity a)
+    {
+        if (a.Group != 0 || !_topology.Hybrid) return "";
+        bool anyP = false, anyE = false;
+        for (int i = 0; i < 64 && i < _topology.CoreOfLogical.Length; i++)
         {
-            if ((mask & (1UL << i)) == 0) continue;
-            int j = i;
-            while (j + 1 < 64 && (mask & (1UL << (j + 1))) != 0) j++;
-            parts.Add(i == j ? $"{i}" : $"{i}–{j}");
-            i = j;
+            if ((a.Mask & (1UL << i)) == 0 || _topology.CoreOfLogical[i] < 0) continue;
+            if (_topology.CoreIsEfficiency[_topology.CoreOfLogical[i]]) anyE = true; else anyP = true;
         }
-        return string.Join(", ", parts);
+        return anyP && !anyE ? ", P-cores only" : anyE && !anyP ? ", E-cores only" : "";
     }
 }

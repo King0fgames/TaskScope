@@ -536,6 +536,47 @@ public partial class MainWindow : Window
         Run(Targets(), p => Actions.SetPriority(p, cls), "change the priority of");
     }
 
+    void Affinity_Click(object sender, RoutedEventArgs e)
+    {
+        var t = Targets();
+        if (t.Count == 0) return;
+        var read = new List<(ProcRow p, Affinity a)>();
+        var unreadable = new List<string>();
+        foreach (var p in t)
+        {
+            try { read.Add((p, Actions.GetAffinity(p))); }
+            catch (Exception ex) { unreadable.Add($"{p.ImageName} (PID {p.Pid}): {ex.Message}"); }
+        }
+        if (read.Count == 0)
+        {
+            MessageBox.Show(this, "Couldn't read the affinity of:\n" + string.Join("\n", unreadable.Take(12)) +
+                (_elevated ? "" : "\n\nClick “Run as admin” to control elevated and system processes."),
+                "TaskScope", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var first = read[0].a;
+        if (read.Any(x => x.a.Group != first.Group))
+        {
+            MessageBox.Show(this, "These processes are in different processor groups, and each group has its own processors. " +
+                "Select processes from one group at a time.", "TaskScope", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        string who = read.Count == 1 ? $"{read[0].p.ImageName} (PID {read[0].p.Pid})" : $"these {read.Count} processes";
+        var notes = new List<string>();
+        if (read.Any(x => x.a.Mask != first.Mask))
+            notes.Add($"They don't all have the same affinity now; the boxes show {read[0].p.ImageName} (PID {read[0].p.Pid}).");
+        if (unreadable.Count > 0)
+            notes.Add($"{unreadable.Count} more couldn't be read and will be left alone" + (_elevated ? "." : " (run as admin to include them)."));
+
+        var w = new AffinityWindow(who, first, _topology, notes.Count > 0 ? string.Join(" ", notes) : null) { Owner = this };
+        if (w.ShowDialog() != true) return;
+        var targets = read.Select(x => x.p).ToList();
+        if (w.Mask != first.GroupMask && !ConfirmCritical(targets, "limit")) return;
+        Run(targets, p => Actions.SetAffinity(p, w.Mask), "change the affinity of");
+    }
+
     void Watch_Click(object sender, RoutedEventArgs e)
     {
         var t = Targets();

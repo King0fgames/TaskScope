@@ -276,6 +276,7 @@
                             <MenuItem Header="Below normal" Tag="16384" Click="Priority_Click" />
                             <MenuItem Header="Low" Tag="64" Click="Priority_Click" />
                         </MenuItem>
+                        <MenuItem x:Name="MiAffinity" Header="Set affinity…" Click="Affinity_Click" />
                         <Separator />
                         <MenuItem Header="Watch memory…" Click="Watch_Click" />
                         <MenuItem Header="Open file location" Click="OpenLocation_Click" />
@@ -408,6 +409,9 @@
                                     <TextBlock x:Name="DName" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                     <TextBlock x:Name="DSub" Opacity="0.7" TextTrimming="CharacterEllipsis" />
                                     <TextBlock x:Name="DCpuUse" Opacity="0.85" TextTrimming="CharacterEllipsis" Margin="0,2,0,0" />
+                                    <TextBlock Opacity="0.85" TextTrimming="CharacterEllipsis" Margin="0,1,0,0">
+                                        <Run x:Name="DAffinityText" /><Hyperlink x:Name="DAffinityLink" Click="Affinity_Click">Change…</Hyperlink>
+                                    </TextBlock>
                                 </StackPanel>
                             </DockPanel>
                             <TextBlock DockPanel.Dock="Top" Text="Path" FontSize="11" Opacity="0.6" Margin="0,8,0,0" />
