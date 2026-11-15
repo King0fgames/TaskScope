@@ -73,3 +73,7 @@ Settings (warning threshold, update speed, memory watches, window position) are 
 | `Ui.cs` | Sparkline graph control and icon helpers |
 
 The UI uses WPF's Fluent theme and follows the Windows light/dark setting.
+
+## License
+
+[MIT](LICENSE)
