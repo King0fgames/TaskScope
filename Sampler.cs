@@ -30,11 +30,14 @@ public sealed class ProcSample
     public RawProc Raw = null!;
     public ProcInfo Info = null!;
     public double Cpu, Disk, Gpu;
-    public long GpuMem;
+    /// <summary>Dedicated and shared GPU memory, summed over all GPUs.</summary>
+    public long GpuMem, GpuShared;
     /// <summary>Threads that used at least ~0.5% of one core since the last sample.</summary>
     public int BusyThreads;
     /// <summary>GPU % per adapter (LUID key), only for processes using a GPU.</summary>
     public Dictionary<string, double>? GpuByAdapter;
+    /// <summary>GPU % per engine type on each adapter (GpuEngineKey), only for processes using a GPU.</summary>
+    public Dictionary<string, double>? GpuEngines;
 }
 
 public sealed class DiskSample
@@ -46,15 +49,65 @@ public sealed class DiskSample
 public sealed class GpuAdapterSample
 {
     public string Luid = "", Name = "";
+    /// <summary>Position in the adapter list, shown as "GPU 0", "GPU 1", …</summary>
+    public int Index;
+    /// <summary>Busiest engine, %.</summary>
     public double Util;
-    public long DedicatedUsed, DedicatedTotal;
+    public long DedicatedUsed, DedicatedTotal, SharedUsed, SharedTotal;
+    /// <summary>Usage % per engine type ("3D", "Copy", "Video Decode", …): the busiest engine of that type.</summary>
+    public Dictionary<string, double> Engines = new();
+}
+
+/// <summary>Engine type names and the "adapter|type" keys used for per-engine usage.</summary>
+public static class GpuEngine
+{
+    public static string Key(string luid, string type) => luid + "|" + type;
+
+    public static (string luid, string type) Split(string key)
+    {
+        int bar = key.IndexOf('|');
+        return bar < 0 ? (key, "") : (key[..bar], key[(bar + 1)..]);
+    }
+
+    /// <summary>
+    /// "VideoDecode" → "Video Decode", "Compute_1" / "Compute 1" → "Compute", "" → "Other".
+    /// Numbered engines of one kind become one type (its usage is the busiest of them).
+    /// </summary>
+    public static string Normalize(string raw)
+    {
+        var s = raw.Replace('_', ' ').Trim();
+        int end = s.Length;
+        while (end > 0 && char.IsDigit(s[end - 1])) end--;
+        if (end < s.Length && end > 0 && s[end - 1] == ' ') s = s[..(end - 1)];
+        var sb = new StringBuilder(s.Length + 4);
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(s[i]) && char.IsLower(s[i - 1])) sb.Append(' ');
+            sb.Append(s[i]);
+        }
+        return sb.Length == 0 ? "Other" : sb.ToString();
+    }
+
+    static readonly string[] Order = { "3D", "Copy", "Video Encode", "Video Decode", "Video Processing", "Compute", "Cuda" };
+
+    /// <summary>The engines Task Manager shows by default; others get a graph once they have been busy.</summary>
+    public static bool IsMain(string type) => Array.IndexOf(Order, type) is >= 0 and < 4;
+
+    /// <summary>Sort order: the engines Task Manager shows first, then the rest by name, "Other" last.</summary>
+    public static int Compare(string a, string b)
+    {
+        static int Rank(string t) { int i = Array.IndexOf(Order, t); return i >= 0 ? i : t == "Other" ? 1000 : 100; }
+        int c = Rank(a).CompareTo(Rank(b));
+        return c != 0 ? c : string.CompareOrdinal(a, b);
+    }
 }
 
 public sealed class SystemSample
 {
     public double Cpu, Disk, Gpu;
     public bool GpuAvailable;
-    public long GpuMem;
+    /// <summary>Dedicated and shared GPU memory in use, summed over all GPUs.</summary>
+    public long GpuMem, GpuShared, GpuMemTotal, GpuSharedTotal;
     public ulong PhysTotal, PhysAvail, CommitLimit, CommitAvail;
     public int Threads, Handles;
     /// <summary>Per logical processor: busy % and the kernel-mode part of it.</summary>
@@ -112,8 +165,13 @@ public sealed unsafe class Sampler : IDisposable
         var mem = Native.MemoryStatus();
         sys.PhysTotal = mem.ullTotalPhys; sys.PhysAvail = mem.ullAvailPhys;
         sys.CommitLimit = mem.ullTotalPageFile; sys.CommitAvail = mem.ullAvailPageFile;
-        sys.GpuAvailable = gpu.Available; sys.Gpu = gpu.Total; sys.GpuMem = gpu.TotalMem;
+        sys.GpuAvailable = gpu.Available; sys.Gpu = gpu.Total;
         sys.Gpus = gpu.Adapters;
+        foreach (var a in gpu.Adapters)
+        {
+            sys.GpuMem += a.DedicatedUsed; sys.GpuShared += a.SharedUsed;
+            sys.GpuMemTotal += a.DedicatedTotal; sys.GpuSharedTotal += a.SharedTotal;
+        }
         sys.Disks = _disk.Sample();
 
         var next = new Dictionary<ProcKey, (long, long)>(raws.Count);
@@ -139,8 +197,9 @@ public sealed unsafe class Sampler : IDisposable
                 if (havePrev && _prevThreads.TryGetValue(tid, out long pt) && t - pt >= busyThreshold) s.BusyThreads++;
                 nextThreads[tid] = t;
             }
-            if (gpu.PerPid.TryGetValue(r.Pid, out var g)) { s.Gpu = Math.Min(100, g.util); s.GpuMem = g.mem; }
+            if (gpu.PerPid.TryGetValue(r.Pid, out var g)) { s.Gpu = Math.Min(100, g.util); s.GpuMem = g.mem; s.GpuShared = g.shared; }
             gpu.PerPidAdapter.TryGetValue(r.Pid, out s.GpuByAdapter);
+            gpu.PerPidEngine.TryGetValue(r.Pid, out s.GpuEngines);
             if (!_info.TryGetValue(key, out var info)) _info[key] = info = LoadInfo(r);
             s.Info = info;
             sys.Disk += s.Disk;
@@ -332,16 +391,18 @@ public sealed class GpuSampler : IDisposable
     {
         public bool Available;
         public double Total;
-        public long TotalMem;
-        public Dictionary<int, (double util, long mem)> PerPid = new();
+        public Dictionary<int, (double util, long mem, long shared)> PerPid = new();
         public Dictionary<int, Dictionary<string, double>> PerPidAdapter = new();
+        /// <summary>Per process: % per GpuEngine.Key(adapter, type).</summary>
+        public Dictionary<int, Dictionary<string, double>> PerPidEngine = new();
         public List<GpuAdapterSample> Adapters = new();
     }
 
     IntPtr _q;
-    readonly IntPtr _eng, _mem, _adapterMem;
+    readonly IntPtr _eng, _mem, _shared, _adapterMem, _adapterShared;
     readonly bool _ok;
-    readonly Dictionary<string, (string name, long dedicated)> _names;
+    readonly Dictionary<string, GpuNames.Info> _names;
+    readonly Dictionary<string, string> _typeOf = new();
 
     public GpuSampler()
     {
@@ -352,7 +413,9 @@ public sealed class GpuSampler : IDisposable
             _eng = Pdh.Add(_q, @"\GPU Engine(*)\Utilization Percentage");
             if (_eng == IntPtr.Zero) return;
             _mem = Pdh.Add(_q, @"\GPU Process Memory(*)\Dedicated Usage");
+            _shared = Pdh.Add(_q, @"\GPU Process Memory(*)\Shared Usage");
             _adapterMem = Pdh.Add(_q, @"\GPU Adapter Memory(*)\Dedicated Usage");
+            _adapterShared = Pdh.Add(_q, @"\GPU Adapter Memory(*)\Shared Usage");
             Native.PdhCollectQueryData(_q);
             _ok = true;
         }
@@ -365,8 +428,9 @@ public sealed class GpuSampler : IDisposable
         if (!_ok || Native.PdhCollectQueryData(_q) != 0) return res;
         res.Available = true;
 
-        // An engine is "luid_<adapter>_phys_N_eng_N_engtype_X". A GPU's usage is its busiest engine
-        // (like Task Manager); a process's usage on a GPU is its busiest engine there.
+        // An engine is "pid_N_luid_<adapter>_phys_N_eng_N_engtype_X". Each engine's usage is the sum over
+        // processes. Like Task Manager, a GPU's usage is its busiest engine, an engine type's usage is its
+        // busiest engine of that type, and a process's usage is its busiest engine.
         var perEngine = new Dictionary<string, double>();
         var adapterOf = new Dictionary<string, string>();
         var perPidEngine = new Dictionary<(int, string), double>();
@@ -392,8 +456,9 @@ public sealed class GpuSampler : IDisposable
                 adapters[luid] = a = new GpuAdapterSample
                 {
                     Luid = luid,
-                    Name = known ? n.name : "GPU " + luid,
-                    DedicatedTotal = known ? n.dedicated : 0,
+                    Name = known ? n.Name : "GPU " + luid,
+                    DedicatedTotal = known ? n.Dedicated : 0,
+                    SharedTotal = known ? n.Shared : 0,
                 };
             }
             return a;
@@ -402,38 +467,65 @@ public sealed class GpuSampler : IDisposable
         foreach (var (eng, v) in perEngine)
         {
             var a = Adapter(adapterOf[eng]);
+            string type = TypeOf(eng);
             a.Util = Math.Min(100, Math.Max(a.Util, v));
-            res.Total = Math.Min(100, Math.Max(res.Total, v));
+            a.Engines[type] = Math.Min(100, Math.Max(a.Engines.GetValueOrDefault(type), v));
         }
         foreach (var ((pid, eng), v) in perPidEngine)
         {
             var cur = res.PerPid.GetValueOrDefault(pid);
-            res.PerPid[pid] = (Math.Max(cur.util, v), cur.mem);
+            res.PerPid[pid] = (Math.Max(cur.util, v), cur.mem, cur.shared);
             if (v <= 0) continue;
-            if (!res.PerPidAdapter.TryGetValue(pid, out var byAdapter)) res.PerPidAdapter[pid] = byAdapter = new();
             string luid = adapterOf[eng];
+            if (!res.PerPidAdapter.TryGetValue(pid, out var byAdapter)) res.PerPidAdapter[pid] = byAdapter = new();
             byAdapter[luid] = Math.Min(100, Math.Max(byAdapter.GetValueOrDefault(luid), v));
+            if (!res.PerPidEngine.TryGetValue(pid, out var byEngine)) res.PerPidEngine[pid] = byEngine = new();
+            string key = GpuEngine.Key(luid, TypeOf(eng));
+            byEngine[key] = Math.Min(100, Math.Max(byEngine.GetValueOrDefault(key), v));
         }
         Pdh.Read(_mem, Pdh.FMT_LARGE, (name, _, l) =>
         {
             int pid = ParsePid(name);
-            res.TotalMem += l;
-            if (pid > 0)
-            {
-                var cur = res.PerPid.GetValueOrDefault(pid);
-                res.PerPid[pid] = (cur.util, cur.mem + l);
-            }
+            if (pid <= 0) return;
+            var cur = res.PerPid.GetValueOrDefault(pid);
+            res.PerPid[pid] = (cur.util, cur.mem + l, cur.shared);
+        });
+        Pdh.Read(_shared, Pdh.FMT_LARGE, (name, _, l) =>
+        {
+            int pid = ParsePid(name);
+            if (pid <= 0) return;
+            var cur = res.PerPid.GetValueOrDefault(pid);
+            res.PerPid[pid] = (cur.util, cur.mem, cur.shared + l);
         });
         Pdh.Read(_adapterMem, Pdh.FMT_LARGE, (name, _, l) =>
         {
             if (ParseLuid(name) is { } luid) Adapter(luid).DedicatedUsed += l;
         });
+        Pdh.Read(_adapterShared, Pdh.FMT_LARGE, (name, _, l) =>
+        {
+            if (ParseLuid(name) is { } luid) Adapter(luid).SharedUsed += l;
+        });
 
         // Show real GPUs only (those DirectX reports), unless DirectX told us nothing.
         foreach (var a in adapters.Values)
             if (_names.Count == 0 || _names.ContainsKey(a.Luid)) res.Adapters.Add(a);
-        res.Adapters.Sort((x, y) => string.CompareOrdinal(x.Luid, y.Luid));
+        // DirectX order puts the primary GPU first, as Task Manager's "GPU 0".
+        int Order(GpuAdapterSample a) => _names.TryGetValue(a.Luid, out var n) ? n.Order : int.MaxValue;
+        res.Adapters.Sort((x, y) => Order(x) != Order(y) ? Order(x).CompareTo(Order(y)) : string.CompareOrdinal(x.Luid, y.Luid));
+        for (int i = 0; i < res.Adapters.Count; i++)
+        {
+            res.Adapters[i].Index = i;
+            res.Total = Math.Max(res.Total, res.Adapters[i].Util);
+        }
         return res;
+    }
+
+    /// <summary>"..._eng_3_engtype_VideoDecode" → "Video Decode" (cached: the same engines come back every sample).</summary>
+    string TypeOf(string eng)
+    {
+        if (_typeOf.TryGetValue(eng, out var t)) return t;
+        int at = eng.IndexOf("engtype_", StringComparison.Ordinal);
+        return _typeOf[eng] = GpuEngine.Normalize(at < 0 ? "" : eng[(at + 8)..]);
     }
 
     static int ParsePid(string name)
@@ -462,31 +554,34 @@ internal static unsafe class GpuNames
 {
     [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(in Guid riid, out IntPtr factory);
 
-    public static Dictionary<string, (string name, long dedicated)> Load()
+    public readonly record struct Info(string Name, long Dedicated, long Shared, int Order);
+
+    public static Dictionary<string, Info> Load()
     {
-        var map = new Dictionary<string, (string, long)>();
+        var map = new Dictionary<string, Info>();
         try
         {
             var iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"); // IDXGIFactory1
             if (CreateDXGIFactory1(in iid, out IntPtr factory) != 0 || factory == IntPtr.Zero) return map;
             var fv = *(IntPtr**)factory;
             var enumAdapters1 = (delegate* unmanaged<IntPtr, uint, IntPtr*, int>)fv[12];
+            byte* d = stackalloc byte[320]; // DXGI_ADAPTER_DESC1
             for (uint i = 0; ; i++)
             {
                 IntPtr adapter;
                 if (enumAdapters1(factory, i, &adapter) != 0) break;
                 var av = *(IntPtr**)adapter;
                 var getDesc1 = (delegate* unmanaged<IntPtr, byte*, int>)av[10];
-                byte* d = stackalloc byte[320];
                 if (getDesc1(adapter, d) == 0)
                 {
                     uint flags = *(uint*)(d + 304);
                     if ((flags & 2) == 0) // skip software adapters (Microsoft Basic Render Driver)
                     {
                         string name = new string((char*)d).Trim();
-                        long dedicated = (long)*(ulong*)(d + 272);
+                        long dedicated = (long)*(ulong*)(d + 272);  // DedicatedVideoMemory
+                        long shared = (long)*(ulong*)(d + 288);     // SharedSystemMemory
                         uint low = *(uint*)(d + 296); int high = *(int*)(d + 300);
-                        map[$"0x{high:X8}_0x{low:X8}"] = (name, dedicated);
+                        map.TryAdd($"0x{high:X8}_0x{low:X8}", new Info(name, dedicated, shared, map.Count));
                     }
                 }
                 ((delegate* unmanaged<IntPtr, uint>)av[2])(adapter); // Release

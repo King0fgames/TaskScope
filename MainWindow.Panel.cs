@@ -10,7 +10,7 @@ using System.Windows.Media;
 
 namespace TaskScope;
 
-/// <summary>The detail panel under the tiles: CPU cores/threads, per-disk, per-GPU, and stacked app graphs.</summary>
+/// <summary>The detail panel under the tiles: CPU cores/threads, per-disk, per-GPU engines and memory, and stacked app graphs.</summary>
 public partial class MainWindow
 {
     public static readonly DependencyProperty CellColumnsProperty =
@@ -21,10 +21,13 @@ public partial class MainWindow
     readonly StackedHistory _cpuStack = new(60), _memStack = new(60), _commitStack = new(60), _gpuStack = new(60), _diskStack = new(60);
 
     readonly CpuTopology _topology = CpuTopology.Load(Math.Min(Environment.ProcessorCount, 64));
-    readonly ObservableCollection<ChartCell> _threadCells = new(), _coreCells = new(), _diskCells = new(), _gpuCells = new();
+    readonly ObservableCollection<ChartCell> _threadCells = new(), _coreCells = new(), _diskCells = new(), _gpuCells = new(),
+        _gpuEngineCells = new(), _gpuMemCells = new();
+    /// <summary>Engines (adapter|type) that have been at least 0.5% busy, so they get a graph.</summary>
+    readonly HashSet<string> _gpuEnginesUsed = new();
     ulong _selAffinity, _sysAffinity;
 
-    static readonly Brush CpuBlue = Frozen("#3B8EEA"), DiskTeal = Frozen("#2BB5C9"), GpuGreen = Frozen("#3FB37F");
+    static readonly Brush CpuBlue = Frozen("#3B8EEA"), DiskTeal = Frozen("#2BB5C9"), GpuGreen = Frozen("#3FB37F"), GpuMemGreen = Frozen("#7CC47F");
     static Brush Frozen(string hex) { var b = (Brush)new BrushConverter().ConvertFromString(hex)!; b.Freeze(); return b; }
 
     void InitPanel()
@@ -63,6 +66,8 @@ public partial class MainWindow
         RecordCpuCells(s);
         RecordDiskCells(s);
         RecordGpuCells(s);
+        RecordGpuEngineCells(s);
+        RecordGpuMemCells(s);
     }
 
     void RecordCpuCells(SystemSample s)
@@ -160,12 +165,94 @@ public partial class MainWindow
             cell.Data.Add(a.Util);
             cell.Stack.Add(a.Util, parts);
             cell.ValueText = Fmt.Pct(a.Util);
-            cell.Sub = a.DedicatedTotal > 0
-                ? $"{Fmt.Bytes(a.DedicatedUsed)} / {Fmt.Bytes(a.DedicatedTotal)} dedicated memory"
-                : $"{Fmt.Bytes(a.DedicatedUsed)} dedicated memory";
-            cell.Tip = $"{a.Name}\nBusiest engine: {Fmt.Pct(a.Util)}";
+            cell.Label = s.Gpus.Count > 1 ? $"GPU {a.Index} · {a.Name}" : a.Name;
+            cell.Sub = $"{UsedOf(a.DedicatedUsed, a.DedicatedTotal)} dedicated · {UsedOf(a.SharedUsed, a.SharedTotal)} shared";
+            var top = a.Engines.Where(e => e.Value >= 0.05).OrderByDescending(e => e.Value).Take(4).Select(e => $"{e.Key} {Fmt.Pct(e.Value)}");
+            cell.Tip = $"{a.Name}\nBusiest engine: {Fmt.Pct(a.Util)}" + (top.Any() ? $" ({string.Join(", ", top)})" : "");
         }
         foreach (var gone in _gpuCells.Where(c => !c.Seen).ToList()) _gpuCells.Remove(gone);
+    }
+
+    static string UsedOf(long used, long total) => total > 0 ? $"{Fmt.Bytes(used)} / {Fmt.Bytes(total)}" : Fmt.Bytes(used);
+
+    /// <summary>One graph per engine type on each GPU (3D, Copy, Video Encode, Video Decode, …), like Task Manager.</summary>
+    void RecordGpuEngineCells(SystemSample s)
+    {
+        var luids = s.Gpus.Select(a => a.Luid).ToHashSet();
+        bool changed = false;
+        foreach (var gone in _gpuEngineCells.Where(c => !luids.Contains(GpuEngine.Split(c.Key).luid)).ToList())
+        {
+            _gpuEngineCells.Remove(gone); changed = true;
+        }
+        var byKey = _gpuEngineCells.ToDictionary(c => c.Key);
+        foreach (var a in s.Gpus)
+        {
+            // The main engines always have a graph; others (Compute, Security, …) once they have been busy.
+            // A graph that goes quiet stays (reading 0%) so the grid doesn't jump around.
+            foreach (var (type, util) in a.Engines)
+            {
+                string key = GpuEngine.Key(a.Luid, type);
+                if (util >= 0.5) _gpuEnginesUsed.Add(key);
+                if (byKey.ContainsKey(key) || !(GpuEngine.IsMain(type) || _gpuEnginesUsed.Contains(key))) continue;
+                var cell = new ChartCell(key, new StackedHistory(60) { SlotSource = _gpuStack }) { FixedMax = 100, Stroke = GpuGreen };
+                byKey[key] = cell; _gpuEngineCells.Add(cell); changed = true;
+            }
+            foreach (var (key, cell) in byKey)
+            {
+                var (luid, type) = GpuEngine.Split(key);
+                if (luid != a.Luid) continue;
+                double v = a.Engines.GetValueOrDefault(type);
+                var parts = new Dictionary<string, double>();
+                foreach (var g in _groups.Values)
+                    if (g.GpuEngines != null && g.GpuEngines.TryGetValue(key, out double gv) && gv > 0) parts[g.ImageName] = gv;
+                cell.Data.Add(v);
+                cell.Stack.Add(v, parts);
+                cell.Label = s.Gpus.Count > 1 ? $"GPU {a.Index} · {type}" : type;
+                cell.ValueText = Fmt.Pct(v);
+                var top = parts.OrderByDescending(p => p.Value).Take(3).Select(p => $"{_gpuStack.Label(p.Key)} {Fmt.Pct(p.Value)}");
+                cell.Tip = $"{a.Name} · {type}: {Fmt.Pct(v)} (busiest {type} engine)" + (top.Any() ? "\n" + string.Join("\n", top) : "");
+            }
+        }
+        if (!changed) return;
+        int Index(ChartCell c) => s.Gpus.FindIndex(a => a.Luid == GpuEngine.Split(c.Key).luid);
+        var sorted = _gpuEngineCells.OrderBy(Index).ThenBy(c => GpuEngine.Split(c.Key).type, Comparer<string>.Create(GpuEngine.Compare)).ToList();
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            int at = _gpuEngineCells.IndexOf(sorted[i]);
+            if (at != i) _gpuEngineCells.Move(at, i);
+        }
+    }
+
+    /// <summary>Dedicated (video) and shared (system RAM) GPU memory, one pair of graphs per GPU.</summary>
+    void RecordGpuMemCells(SystemSample s)
+    {
+        foreach (var c in _gpuMemCells) c.Seen = false;
+        foreach (var a in s.Gpus)
+        {
+            string gpu = s.Gpus.Count > 1 ? $"GPU {a.Index} · " : "";
+            Cell(a.Luid + "|dedicated", $"{gpu}Dedicated memory", a.DedicatedUsed, a.DedicatedTotal, GpuGreen,
+                 $"{a.Name}\nDedicated GPU memory: video memory on the graphics card (on integrated GPUs, RAM set aside for it)");
+            Cell(a.Luid + "|shared", $"{gpu}Shared memory", a.SharedUsed, a.SharedTotal, GpuMemGreen,
+                 $"{a.Name}\nShared GPU memory: system RAM the GPU is using; it counts toward RAM in use");
+        }
+        foreach (var gone in _gpuMemCells.Where(c => !c.Seen).ToList()) _gpuMemCells.Remove(gone);
+
+        void Cell(string key, string label, long used, long total, Brush stroke, string tip)
+        {
+            var cell = _gpuMemCells.FirstOrDefault(c => c.Key == key);
+            if (cell == null)
+            {
+                // No per-app split for memory: the stack stays empty, so the graph is a line even when stacked.
+                cell = new ChartCell(key, new StackedHistory(60)) { FixedMax = total, MinMax = 256.0 * 1048576, Stroke = stroke };
+                _gpuMemCells.Add(cell);
+            }
+            cell.Seen = true;
+            cell.Data.Add(used);
+            cell.Label = label;
+            cell.ValueText = UsedOf(used, total);
+            cell.Sub = total > 0 ? $"{used * 100.0 / total:0}% used" : "";
+            cell.Tip = tip;
+        }
     }
 
     // ───────────────────────── panel ─────────────────────────
@@ -196,7 +283,7 @@ public partial class MainWindow
         _settings.OpenPanel = res;
         ViewButtons.Children.Clear();
         if (res == "cpu") AddViewButtons(("overall", "Overall"), ("cores", "Cores"), ("threads", "Threads"));
-        if (res == "gpu") AddViewButtons(("overall", "Overall"), ("gpus", "Per GPU"));
+        if (res == "gpu") AddViewButtons(("overall", "Overall"), ("engines", "Engines"), ("gpus", "Per GPU"), ("memory", "Memory"));
         UpdatePanel();
         if (_lastSys != null) UpdateTiles(_lastSys, record: false);
     }
@@ -244,18 +331,28 @@ public partial class MainWindow
                      (view != "overall" && _selAffinity != 0 && _selAffinity != _sysAffinity ? " · outlined = where the selected process may run" : ""),
             "mem" => $"{Fmt.Gb(s.PhysTotal - s.PhysAvail)} of {Fmt.Gb(s.PhysTotal)} in use · last 60 s",
             "commit" => $"{Fmt.Gb(s.CommitLimit - s.CommitAvail)} of {Fmt.Gb(s.CommitLimit)} committed · {Fmt.Gb(s.CommitAvail)} free",
-            "gpu" => $"{_gpuCells.Count} GPU{(_gpuCells.Count == 1 ? "" : "s")} · busiest engine {Fmt.Pct(s.Gpu)}",
+            "gpu" => $"{_gpuCells.Count} GPU{(_gpuCells.Count == 1 ? "" : "s")} · busiest engine {Fmt.Pct(s.Gpu)}" +
+                     $" · {UsedOf(s.GpuMem, s.GpuMemTotal)} dedicated · {Fmt.Bytes(s.GpuShared)} shared",
             _ => $"{_diskCells.Count} disk{(_diskCells.Count == 1 ? "" : "s")} · {Fmt.Rate(s.Disk)} by all processes",
         };
 
-        if (view is "cores" or "threads" or "gpus" or "disks")
+        if (view is "cores" or "threads" or "gpus" or "engines" or "memory" or "disks")
         {
-            var cells = view switch { "cores" => _coreCells, "threads" => _threadCells, "gpus" => _gpuCells, _ => _diskCells };
+            var cells = view switch
+            {
+                "cores" => _coreCells, "threads" => _threadCells, "gpus" => _gpuCells,
+                "engines" => _gpuEngineCells, "memory" => _gpuMemCells, _ => _diskCells,
+            };
             BigView.Visibility = Visibility.Collapsed;
             CellsView.Visibility = Visibility.Visible;
             if (!ReferenceEquals(CellsView.ItemsSource, cells)) CellsView.ItemsSource = cells;
             int n = Math.Max(1, cells.Count);
-            int rows = view is "gpus" or "disks" ? (n <= 4 ? 1 : 2) : n <= 8 ? 1 : n <= 16 ? 2 : n <= 48 ? 3 : 4;
+            int rows = view switch
+            {
+                "gpus" or "disks" or "memory" => n <= 4 ? 1 : 2,
+                "engines" => n <= 6 ? 1 : 2,
+                _ => n <= 8 ? 1 : n <= 16 ? 2 : n <= 48 ? 3 : 4,
+            };
             CellColumns = (int)Math.Ceiling(n / (double)rows);
             bool restricted = _selAffinity != 0 && _selAffinity != _sysAffinity;
             for (int i = 0; i < cells.Count; i++)
@@ -272,7 +369,8 @@ public partial class MainWindow
             }
             HeaderLegend.ItemsSource = !stacked ? null : view switch
             {
-                "gpus" => AppLegend(_gpuStack, Fmt.Pct, swatches: true, withValues: false),
+                "gpus" or "engines" => AppLegend(_gpuStack, Fmt.Pct, swatches: true, withValues: false),
+                "memory" => null,
                 "disks" => FixedLegend(("Read", 0), ("Write", 1)),
                 _ => FixedLegend(("User", 0), ("Kernel", 1)),
             };
@@ -353,6 +451,19 @@ public partial class MainWindow
             DAffinityText.Text = "Affinity: set per process ";
             SetAffinityLink($"Set for all {g.Children.Count}…");
         }
+    }
+
+    // ───────────────────────── selected process: GPU ─────────────────────────
+
+    /// <summary>"GPU 12%: 3D 12%, Video Decode 3% · 1.2 GB dedicated, 85 MB shared"; hidden when the process doesn't use a GPU.</summary>
+    void UpdateGpuUse(Row r)
+    {
+        var engines = r.GpuEngines?.Where(e => e.Value >= 0.05).OrderByDescending(e => e.Value).Take(4)
+                          .Select(e => $"{Row.EngineLabel(e.Key)} {Fmt.Pct(e.Value)}").ToList() ?? new();
+        if (engines.Count == 0 && r.GpuMem == 0 && r.GpuShared == 0) { DGpuUse.Visibility = Visibility.Collapsed; return; }
+        DGpuUse.Visibility = Visibility.Visible;
+        string use = engines.Count > 0 ? $"GPU {Fmt.Pct(r.Gpu)}: {string.Join(", ", engines)}" : "GPU idle";
+        DGpuUse.Text = $"{use} · {Fmt.Bytes(r.GpuMem)} dedicated, {Fmt.Bytes(r.GpuShared)} shared GPU memory";
     }
 
     string _affinityLink = "Change…";

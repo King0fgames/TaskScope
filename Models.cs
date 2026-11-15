@@ -35,6 +35,8 @@ public abstract class Row : INotifyPropertyChanged
 {
     public static double MemScale = 16.0 * (1L << 30);
     public static int CpuCount = Environment.ProcessorCount;
+    /// <summary>GPU number by adapter LUID ("GPU 0", "GPU 1", …), refreshed every sample.</summary>
+    public static Dictionary<string, int> GpuIndex = new();
     public event PropertyChangedEventHandler? PropertyChanged;
     protected void Changed(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     protected bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
@@ -60,7 +62,11 @@ public abstract class Row : INotifyPropertyChanged
 
     // Raw values (sorting uses these)
     public double Cpu, Disk, Gpu;
-    public long Private, WorkingSet, GpuMem;
+    public long Private, WorkingSet, GpuMem, GpuShared;
+    /// <summary>GPU % per GpuEngine.Key(adapter, type); null when the process isn't using a GPU.</summary>
+    public Dictionary<string, double>? GpuEngines { get; protected set; }
+    /// <summary>Key of the busiest GPU engine type, "" when none.</summary>
+    public string GpuEngineKey { get; private set; } = "";
     public int Threads, Handles, BusyThreads;
     public bool Suspended;
     /// <summary>CPU use expressed in cores, e.g. 2.7 = as busy as 2.7 logical processors.</summary>
@@ -68,7 +74,7 @@ public abstract class Row : INotifyPropertyChanged
     public readonly RingBuffer CpuHist = new(120), MemHist = new(120);
 
     // Display values (bound in the grid)
-    string _coresT = "", _cpuT = "", _privT = "", _wsT = "", _diskT = "", _gpuT = "", _gpuMemT = "", _thrT = "", _hndT = "", _status = "";
+    string _coresT = "", _cpuT = "", _privT = "", _wsT = "", _diskT = "", _gpuT = "", _gpuMemT = "", _gpuShT = "", _gpuEngT = "", _thrT = "", _hndT = "", _status = "";
     Brush? _cpuH, _memH, _diskH, _gpuH;
     public string CpuText { get => _cpuT; private set => Set(ref _cpuT, value); }
     public string CoresText { get => _coresT; private set => Set(ref _coresT, value); }
@@ -77,6 +83,8 @@ public abstract class Row : INotifyPropertyChanged
     public string DiskText { get => _diskT; private set => Set(ref _diskT, value); }
     public string GpuText { get => _gpuT; private set => Set(ref _gpuT, value); }
     public string GpuMemText { get => _gpuMemT; private set => Set(ref _gpuMemT, value); }
+    public string GpuSharedText { get => _gpuShT; private set => Set(ref _gpuShT, value); }
+    public string GpuEngineText { get => _gpuEngT; private set => Set(ref _gpuEngT, value); }
     public string ThreadsText { get => _thrT; private set => Set(ref _thrT, value); }
     public string HandlesText { get => _hndT; private set => Set(ref _hndT, value); }
     public string StatusText { get => _status; private set => Set(ref _status, value); }
@@ -84,6 +92,13 @@ public abstract class Row : INotifyPropertyChanged
     public Brush? MemHeat { get => _memH; private set => Set(ref _memH, value); }
     public Brush? DiskHeat { get => _diskH; private set => Set(ref _diskH, value); }
     public Brush? GpuHeat { get => _gpuH; private set => Set(ref _gpuH, value); }
+
+    /// <summary>"luid|3D" → "3D", or "GPU 1 · 3D" when there are several GPUs.</summary>
+    public static string EngineLabel(string key)
+    {
+        var (luid, type) = GpuEngine.Split(key);
+        return GpuIndex.Count > 1 && GpuIndex.TryGetValue(luid, out int i) ? $"GPU {i} · {type}" : type;
+    }
 
     protected void Publish()
     {
@@ -94,6 +109,9 @@ public abstract class Row : INotifyPropertyChanged
         DiskText = Fmt.Rate(Disk);
         GpuText = Fmt.Pct(Gpu);
         GpuMemText = GpuMem > 0 ? Fmt.Bytes(GpuMem) : "";
+        GpuSharedText = GpuShared > 0 ? Fmt.Bytes(GpuShared) : "";
+        GpuEngineKey = GpuEngines == null || GpuEngines.Count == 0 ? "" : GpuEngines.MaxBy(e => e.Value).Key;
+        GpuEngineText = GpuEngineKey.Length == 0 || Gpu < 0.05 ? "" : EngineLabel(GpuEngineKey);
         ThreadsText = Threads.ToString("N0");
         HandlesText = Handles.ToString("N0");
         StatusText = Suspended ? "Suspended" : "";
@@ -140,7 +158,7 @@ public sealed class ProcRow : Row
     {
         LastTick = tick;
         var r = s.Raw;
-        Cpu = s.Cpu; Disk = s.Disk; Gpu = s.Gpu; GpuMem = s.GpuMem;
+        Cpu = s.Cpu; Disk = s.Disk; Gpu = s.Gpu; GpuMem = s.GpuMem; GpuShared = s.GpuShared; GpuEngines = s.GpuEngines;
         Private = r.PrivateBytes; WorkingSet = r.WorkingSet;
         Threads = r.Threads; Handles = r.Handles; Suspended = r.Suspended;
         BusyThreads = s.BusyThreads; GpuByAdapter = s.GpuByAdapter;
@@ -179,14 +197,14 @@ public sealed class GroupRow : Row
 
     public void Aggregate()
     {
-        Cpu = Disk = Gpu = 0; Private = WorkingSet = GpuMem = 0; Threads = Handles = BusyThreads = 0;
+        Cpu = Disk = Gpu = 0; Private = WorkingSet = GpuMem = GpuShared = 0; Threads = Handles = BusyThreads = 0;
         _minPid = long.MaxValue;
         bool allSuspended = Children.Count > 0;
         string? desc = null;
         foreach (var c in Children)
         {
             Cpu += c.Cpu; Disk += c.Disk; Gpu += c.Gpu;
-            Private += c.Private; WorkingSet += c.WorkingSet; GpuMem += c.GpuMem;
+            Private += c.Private; WorkingSet += c.WorkingSet; GpuMem += c.GpuMem; GpuShared += c.GpuShared;
             Threads += c.Threads; Handles += c.Handles; BusyThreads += c.BusyThreads;
             allSuspended &= c.Suspended;
             _minPid = Math.Min(_minPid, c.Pid);
@@ -199,6 +217,11 @@ public sealed class GroupRow : Row
             if (c.GpuByAdapter != null)
                 foreach (var (luid, v) in c.GpuByAdapter)
                     (GpuByAdapter ??= new())[luid] = Math.Min(100, GpuByAdapter.GetValueOrDefault(luid) + v);
+        GpuEngines = null;
+        foreach (var c in Children)
+            if (c.GpuEngines != null)
+                foreach (var (key, v) in c.GpuEngines)
+                    (GpuEngines ??= new())[key] = Math.Min(100, GpuEngines.GetValueOrDefault(key) + v);
         Suspended = allSuspended;
         Name = desc ?? ImageName;
         CountText = $"({Children.Count})";
