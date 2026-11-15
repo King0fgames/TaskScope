@@ -1,0 +1,139 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+
+namespace TaskScope;
+
+/// <summary>A lightweight history graph that draws a RingBuffer.</summary>
+public sealed class Sparkline : FrameworkElement
+{
+    public static readonly DependencyProperty StrokeProperty = DependencyProperty.Register(
+        nameof(Stroke), typeof(Brush), typeof(Sparkline),
+        new FrameworkPropertyMetadata(Brushes.DodgerBlue, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    public Brush Stroke { get => (Brush)GetValue(StrokeProperty); set => SetValue(StrokeProperty, value); }
+
+    RingBuffer? _data;
+    public RingBuffer? Data { get => _data; set { _data = value; InvalidateVisual(); } }
+    /// <summary>Fixed top of the scale (e.g. 100 for percentages); 0 = auto-scale.</summary>
+    public double FixedMax { get; set; }
+    /// <summary>Smallest top of the scale when auto-scaling, so idle noise stays flat.</summary>
+    public double MinMax { get; set; } = 1;
+
+    public void Refresh() => InvalidateVisual();
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        double w = ActualWidth, h = ActualHeight;
+        if (w < 4 || h < 4) return;
+        dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, w, h));
+        var d = _data;
+        if (d == null || d.Count < 2) return;
+
+        double max = FixedMax > 0 ? FixedMax : Math.Max(d.Max() * 1.1, MinMax);
+        double step = w / (d.Capacity - 1);
+        double x0 = w - (d.Count - 1) * step;
+        Point P(int i) => new(x0 + i * step, h - 1 - Math.Clamp(d[i] / max, 0, 1) * (h - 2));
+
+        var line = new StreamGeometry();
+        using (var c = line.Open())
+        {
+            c.BeginFigure(P(0), false, false);
+            for (int i = 1; i < d.Count; i++) c.LineTo(P(i), true, true);
+        }
+        line.Freeze();
+        var fill = new StreamGeometry();
+        using (var c = fill.Open())
+        {
+            c.BeginFigure(new Point(x0, h), true, true);
+            for (int i = 0; i < d.Count; i++) c.LineTo(P(i), false, false);
+            c.LineTo(new Point(w, h), false, false);
+        }
+        fill.Freeze();
+
+        var stroke = Stroke;
+        Brush fillBrush = stroke;
+        if (stroke is SolidColorBrush sb)
+        {
+            fillBrush = new SolidColorBrush(Color.FromArgb(0x38, sb.Color.R, sb.Color.G, sb.Color.B));
+            fillBrush.Freeze();
+        }
+        dc.DrawGeometry(fillBrush, null, fill);
+        dc.DrawGeometry(null, new Pen(stroke, 1.5) { LineJoin = PenLineJoin.Round }, line);
+    }
+}
+
+/// <summary>Small shell icons for executables, cached by path.</summary>
+public static class IconCache
+{
+    static readonly Dictionary<string, ImageSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    const uint SHGFI_ICON = 0x100, SHGFI_SMALLICON = 0x1, SHGFI_USEFILEATTRIBUTES = 0x10, FILE_ATTRIBUTE_NORMAL = 0x80;
+
+    public static ImageSource? Get(string path)
+    {
+        if (Cache.TryGetValue(path, out var img)) return img;
+        img = Load(path.Length > 0 ? path : "generic.exe", path.Length == 0);
+        Cache[path] = img;
+        return img;
+    }
+
+    static ImageSource? Load(string path, bool generic)
+    {
+        var info = new Native.SHFILEINFO();
+        uint flags = SHGFI_ICON | SHGFI_SMALLICON | (generic ? SHGFI_USEFILEATTRIBUTES : 0);
+        Native.SHGetFileInfo(path, FILE_ATTRIBUTE_NORMAL, ref info, (uint)Marshal.SizeOf<Native.SHFILEINFO>(), flags);
+        if (info.hIcon == IntPtr.Zero) return generic ? null : Get("");
+        try
+        {
+            var src = Imaging.CreateBitmapSourceFromHIcon(info.hIcon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            src.Freeze();
+            return src;
+        }
+        catch { return null; }
+        finally { Native.DestroyIcon(info.hIcon); }
+    }
+
+    /// <summary>Draws the app's own icon (a rounded tile with a pulse line).</summary>
+    public static BitmapSource AppIcon(int size)
+    {
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
+        {
+            double s = size;
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(0x25, 0x6E, 0xD8)), null,
+                new Rect(0, 0, s, s), s * 0.2, s * 0.2);
+            var g = new StreamGeometry();
+            using (var c = g.Open())
+            {
+                c.BeginFigure(new Point(s * 0.12, s * 0.58), false, false);
+                c.PolyLineTo(new[]
+                {
+                    new Point(s * 0.34, s * 0.58), new Point(s * 0.44, s * 0.28), new Point(s * 0.58, s * 0.78),
+                    new Point(s * 0.68, s * 0.48), new Point(s * 0.88, s * 0.48)
+                }, true, true);
+            }
+            dc.DrawGeometry(null, new Pen(Brushes.White, Math.Max(1.5, s * 0.09))
+            { LineJoin = PenLineJoin.Round, StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round }, g);
+        }
+        var bmp = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        bmp.Render(dv);
+        bmp.Freeze();
+        return bmp;
+    }
+
+    public static System.Drawing.Icon AppTrayIcon()
+    {
+        var enc = new PngBitmapEncoder();
+        enc.Frames.Add(BitmapFrame.Create(AppIcon(32)));
+        using var ms = new MemoryStream();
+        enc.Save(ms);
+        ms.Position = 0;
+        using var bmp = new System.Drawing.Bitmap(ms);
+        return System.Drawing.Icon.FromHandle(bmp.GetHicon());
+    }
+}

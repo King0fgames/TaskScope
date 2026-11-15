@@ -1,0 +1,353 @@
+<Window x:Class="TaskScope.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:TaskScope"
+        Title="TaskScope" Width="1220" Height="800" MinWidth="780" MinHeight="460"
+        FontSize="13">
+    <Window.Resources>
+        <Style x:Key="Num" TargetType="TextBlock">
+            <Setter Property="HorizontalAlignment" Value="Right" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="6,0,8,0" />
+            <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+        </Style>
+        <Style x:Key="Tile" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="Margin" Value="4" />
+        </Style>
+        <Style x:Key="TileTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Opacity" Value="0.75" />
+        </Style>
+        <Style x:Key="TileValue" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="19" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,1,0,0" />
+            <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+        </Style>
+        <Style x:Key="TileSub" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Opacity" Value="0.7" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        </Style>
+        <Style x:Key="Chevron" TargetType="Button">
+            <Setter Property="Width" Value="20" />
+            <Setter Property="Height" Value="20" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="9" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- Status bar -->
+        <Border DockPanel.Dock="Bottom" Padding="14,5" BorderThickness="0,1,0,0"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+            <DockPanel>
+                <TextBlock x:Name="StatusRight" DockPanel.Dock="Right" Opacity="0.75" TextTrimming="CharacterEllipsis" MaxWidth="640" />
+                <TextBlock x:Name="StatusLeft" Opacity="0.75" />
+            </DockPanel>
+        </Border>
+
+        <Grid Margin="10,8,10,6">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" MinHeight="120" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="170" MinHeight="90" />
+            </Grid.RowDefinitions>
+
+            <!-- Toolbar -->
+            <DockPanel Grid.Row="0" Margin="4,0,4,4" LastChildFill="False">
+                <Grid DockPanel.Dock="Left" Width="300">
+                    <TextBox x:Name="SearchBox" TextChanged="SearchBox_TextChanged" VerticalContentAlignment="Center" />
+                    <TextBlock x:Name="SearchHint" Text="Search name, PID, path or command line   (Ctrl+F)"
+                               IsHitTestVisible="False" Opacity="0.5" VerticalAlignment="Center" Margin="12,0,0,0" />
+                </Grid>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <ToggleButton x:Name="GroupToggle" Content="Group by app" Margin="4,0" Click="GroupToggle_Click" />
+                    <ToggleButton x:Name="PauseToggle" Content="Pause" Margin="4,0" Click="PauseToggle_Click"
+                                  ToolTip="Freeze the list so rows stop moving (Space)" />
+                    <ToggleButton x:Name="TopToggle" Content="Always on top" Margin="4,0" Click="TopToggle_Click" />
+                    <Button x:Name="AdminButton" Content="Run as admin" Margin="4,0" Click="AdminButton_Click"
+                            ToolTip="Restart elevated so you can end, pause and inspect system and elevated processes" />
+                    <Button Content="Settings" Margin="4,0,0,0" Click="Settings_Click" />
+                </StackPanel>
+            </DockPanel>
+
+            <!-- Low memory banner -->
+            <Border x:Name="Banner" Grid.Row="1" Visibility="Collapsed" Margin="4,2,4,4" Padding="12,8" CornerRadius="6"
+                    BorderThickness="1" Background="{DynamicResource SystemFillColorCriticalBackgroundBrush}"
+                    BorderBrush="{DynamicResource SystemFillColorCriticalBrush}">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="Show biggest" Click="ShowBiggest_Click" Margin="12,0,0,0" VerticalAlignment="Center" />
+                    <TextBlock x:Name="BannerText" TextWrapping="Wrap" VerticalAlignment="Center" />
+                </DockPanel>
+            </Border>
+
+            <!-- Tiles -->
+            <UniformGrid Grid.Row="2" Columns="5" Margin="0,0,0,4">
+                <Border Style="{StaticResource Tile}">
+                    <StackPanel>
+                        <TextBlock Text="CPU" Style="{StaticResource TileTitle}" />
+                        <TextBlock x:Name="CpuValue" Style="{StaticResource TileValue}" />
+                        <TextBlock x:Name="CpuSub" Style="{StaticResource TileSub}" />
+                        <local:Sparkline x:Name="CpuSpark" Height="34" Margin="0,6,0,0" Stroke="#3B8EEA" FixedMax="100" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Tile}">
+                    <StackPanel>
+                        <TextBlock Text="Memory (RAM)" Style="{StaticResource TileTitle}" />
+                        <TextBlock x:Name="MemValue" Style="{StaticResource TileValue}" />
+                        <TextBlock x:Name="MemSub" Style="{StaticResource TileSub}" />
+                        <local:Sparkline x:Name="MemSpark" Height="34" Margin="0,6,0,0" Stroke="#A66BFF" FixedMax="100" />
+                    </StackPanel>
+                </Border>
+                <Border x:Name="CommitTile" Style="{StaticResource Tile}"
+                        ToolTip="Commit = memory programs have reserved (RAM + page file). When it runs out, Windows refuses memory and programs crash, even if RAM looks free.">
+                    <StackPanel>
+                        <TextBlock Text="Commit (RAM + page file)" Style="{StaticResource TileTitle}" />
+                        <TextBlock x:Name="CommitValue" Style="{StaticResource TileValue}" />
+                        <TextBlock x:Name="CommitSub" Style="{StaticResource TileSub}" />
+                        <local:Sparkline x:Name="CommitSpark" Height="34" Margin="0,6,0,0" Stroke="#E8A33D" FixedMax="100" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Tile}">
+                    <StackPanel>
+                        <TextBlock Text="GPU" Style="{StaticResource TileTitle}" />
+                        <TextBlock x:Name="GpuValue" Style="{StaticResource TileValue}" />
+                        <TextBlock x:Name="GpuSub" Style="{StaticResource TileSub}" />
+                        <local:Sparkline x:Name="GpuSpark" Height="34" Margin="0,6,0,0" Stroke="#3FB37F" FixedMax="100" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Tile}">
+                    <StackPanel>
+                        <TextBlock Text="Disk I/O" Style="{StaticResource TileTitle}" />
+                        <TextBlock x:Name="DiskValue" Style="{StaticResource TileValue}" />
+                        <TextBlock x:Name="DiskSub" Style="{StaticResource TileSub}" Text="read + write, all processes" />
+                        <local:Sparkline x:Name="DiskSpark" Height="34" Margin="0,6,0,0" Stroke="#2BB5C9" MinMax="1048576" />
+                    </StackPanel>
+                </Border>
+            </UniformGrid>
+
+            <!-- Process list -->
+            <DataGrid x:Name="ProcGrid" Grid.Row="3" Margin="4,0"
+                      AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                      GridLinesVisibility="None" SelectionMode="Extended" SelectionUnit="FullRow"
+                      CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
+                      CanUserReorderColumns="True" RowHeight="28"
+                      Background="Transparent" RowBackground="Transparent" AlternatingRowBackground="Transparent"
+                      Foreground="{DynamicResource TextFillColorPrimaryBrush}" BorderThickness="0"
+                      EnableRowVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                      Sorting="ProcGrid_Sorting" SelectionChanged="ProcGrid_SelectionChanged"
+                      PreviewKeyDown="ProcGrid_PreviewKeyDown" MouseDoubleClick="ProcGrid_MouseDoubleClick"
+                      ContextMenuOpening="ProcGrid_ContextMenuOpening">
+                <DataGrid.RowStyle>
+                    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+                        <Setter Property="ToolTip" Value="{Binding Tip}" />
+                        <Setter Property="ToolTipService.InitialShowDelay" Value="900" />
+                    </Style>
+                </DataGrid.RowStyle>
+                <DataGrid.CellStyle>
+                    <Style TargetType="DataGridCell" BasedOn="{StaticResource {x:Type DataGridCell}}">
+                        <Setter Property="BorderThickness" Value="0" />
+                        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                <Setter Property="Background" Value="#1F3B8EEA" />
+                            </DataTrigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#663B8EEA" />
+                                <Setter Property="BorderBrush" Value="Transparent" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.CellStyle>
+                <DataGrid.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem x:Name="MiEnd" Header="End task" InputGestureText="Del" Click="End_Click" />
+                        <MenuItem x:Name="MiEndTree" Header="End process tree" Click="EndTree_Click" />
+                        <Separator />
+                        <MenuItem x:Name="MiSuspend" Header="Pause (suspend)" Click="Suspend_Click" />
+                        <MenuItem x:Name="MiResume" Header="Resume" Click="Resume_Click" />
+                        <MenuItem Header="Set priority">
+                            <MenuItem Header="High" Tag="128" Click="Priority_Click" />
+                            <MenuItem Header="Above normal" Tag="32768" Click="Priority_Click" />
+                            <MenuItem Header="Normal" Tag="32" Click="Priority_Click" />
+                            <MenuItem Header="Below normal" Tag="16384" Click="Priority_Click" />
+                            <MenuItem Header="Low" Tag="64" Click="Priority_Click" />
+                        </MenuItem>
+                        <Separator />
+                        <MenuItem Header="Watch memory…" Click="Watch_Click" />
+                        <MenuItem Header="Open file location" Click="OpenLocation_Click" />
+                        <MenuItem Header="Copy">
+                            <MenuItem Header="Name" Tag="name" Click="Copy_Click" />
+                            <MenuItem Header="PID" Tag="pid" Click="Copy_Click" />
+                            <MenuItem Header="Path" Tag="path" Click="Copy_Click" />
+                            <MenuItem Header="Command line" Tag="cmd" Click="Copy_Click" />
+                        </MenuItem>
+                    </ContextMenu>
+                </DataGrid.ContextMenu>
+                <DataGrid.Columns>
+                    <DataGridTemplateColumn Header="Name" SortMemberPath="Name" Width="*" MinWidth="220">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="{Binding IndentMargin}" VerticalAlignment="Center">
+                                    <Button Style="{StaticResource Chevron}" Content="{Binding ExpandGlyph}"
+                                            Visibility="{Binding ExpanderVisibility}" Click="Expander_Click" />
+                                    <Image Source="{Binding Icon}" Width="16" Height="16" Margin="2,0,8,0" VerticalAlignment="Center" />
+                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding CountText}" Opacity="0.55" Margin="5,0,0,0" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Process" SortMemberPath="ImageName" Width="140">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding ImageName}" Opacity="0.75" VerticalAlignment="Center" Margin="6,0" TextTrimming="CharacterEllipsis" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="PID" SortMemberPath="Pid" Width="64">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate><TextBlock Text="{Binding PidText}" Style="{StaticResource Num}" Opacity="0.75" /></DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Status" SortMemberPath="Status" Width="82">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" Margin="6,0"
+                                           Foreground="{DynamicResource SystemFillColorCautionBrush}" FontWeight="SemiBold" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="CPU" SortMemberPath="Cpu" Width="70">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding CpuHeat}"><TextBlock Text="{Binding CpuText}" Style="{StaticResource Num}" /></Border>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn SortMemberPath="Private" Width="96">
+                        <DataGridTemplateColumn.Header>
+                            <TextBlock Text="Memory" ToolTip="Private (committed) memory: what counts against the commit limit" />
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding MemHeat}"><TextBlock Text="{Binding PrivateText}" Style="{StaticResource Num}" /></Border>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn SortMemberPath="WorkingSet" Width="96">
+                        <DataGridTemplateColumn.Header>
+                            <TextBlock Text="In RAM" ToolTip="Working set: how much physical RAM the process is using right now" />
+                        </DataGridTemplateColumn.Header>
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate><TextBlock Text="{Binding WorkingSetText}" Style="{StaticResource Num}" /></DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Disk" SortMemberPath="Disk" Width="84">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding DiskHeat}"><TextBlock Text="{Binding DiskText}" Style="{StaticResource Num}" /></Border>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="GPU" SortMemberPath="Gpu" Width="64">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding GpuHeat}"><TextBlock Text="{Binding GpuText}" Style="{StaticResource Num}" /></Border>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="GPU mem" SortMemberPath="GpuMem" Width="86">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate><TextBlock Text="{Binding GpuMemText}" Style="{StaticResource Num}" /></DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Threads" SortMemberPath="Threads" Width="70">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate><TextBlock Text="{Binding ThreadsText}" Style="{StaticResource Num}" Opacity="0.75" /></DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Handles" SortMemberPath="Handles" Width="76">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate><TextBlock Text="{Binding HandlesText}" Style="{StaticResource Num}" Opacity="0.75" /></DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <GridSplitter Grid.Row="4" Height="8" HorizontalAlignment="Stretch" Background="Transparent" ResizeBehavior="PreviousAndNext" />
+
+            <!-- Details -->
+            <Border Grid.Row="5" Style="{StaticResource Tile}">
+                <Grid>
+                    <TextBlock x:Name="DetailsEmpty" Text="Select a process to see its details and history."
+                               Opacity="0.6" VerticalAlignment="Center" HorizontalAlignment="Center" />
+                    <Grid x:Name="DetailsBody" Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="16" />
+                            <ColumnDefinition Width="260" />
+                            <ColumnDefinition Width="16" />
+                            <ColumnDefinition Width="260" />
+                        </Grid.ColumnDefinitions>
+                        <DockPanel Grid.Column="0">
+                            <DockPanel DockPanel.Dock="Top">
+                                <Image x:Name="DIcon" Width="32" Height="32" Margin="0,0,10,0" VerticalAlignment="Top" />
+                                <StackPanel>
+                                    <TextBlock x:Name="DName" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock x:Name="DSub" Opacity="0.7" TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Text="Path" FontSize="11" Opacity="0.6" Margin="0,8,0,0" />
+                            <TextBlock x:Name="DPath" DockPanel.Dock="Top" TextTrimming="CharacterEllipsis" />
+                            <TextBlock DockPanel.Dock="Top" Text="Command line" FontSize="11" Opacity="0.6" Margin="0,6,0,0" />
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <TextBlock x:Name="DCmd" TextWrapping="Wrap" FontFamily="Cascadia Mono, Consolas" FontSize="12" Opacity="0.85" />
+                            </ScrollViewer>
+                        </DockPanel>
+                        <DockPanel Grid.Column="2">
+                            <DockPanel DockPanel.Dock="Top">
+                                <TextBlock x:Name="DCpuVal" DockPanel.Dock="Right" FontWeight="SemiBold" />
+                                <TextBlock Text="CPU · last 2 min" Opacity="0.7" />
+                            </DockPanel>
+                            <Border BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" Margin="0,4,0,0" CornerRadius="3">
+                                <local:Sparkline x:Name="DCpu" Stroke="#3B8EEA" MinMax="5" />
+                            </Border>
+                        </DockPanel>
+                        <DockPanel Grid.Column="4">
+                            <DockPanel DockPanel.Dock="Top">
+                                <TextBlock x:Name="DMemVal" DockPanel.Dock="Right" FontWeight="SemiBold" />
+                                <TextBlock Text="Memory · last 2 min" Opacity="0.7" />
+                            </DockPanel>
+                            <Border BorderThickness="1" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" Margin="0,4,0,0" CornerRadius="3">
+                                <local:Sparkline x:Name="DMem" Stroke="#A66BFF" MinMax="1048576" />
+                            </Border>
+                        </DockPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>
