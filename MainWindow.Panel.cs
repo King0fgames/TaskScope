@@ -72,14 +72,21 @@ public partial class MainWindow
         if (_threadCells.Count != n)
         {
             _threadCells.Clear();
+            bool smt = _topology.CoreThreads.Any(t => t.Length > 1);
             for (int i = 0; i < n; i++)
             {
                 int core = i < _topology.CoreOfLogical.Length ? _topology.CoreOfLogical[i] : -1;
                 string kind = core >= 0 && _topology.Hybrid ? (_topology.CoreIsEfficiency[core] ? " (E-core)" : " (P-core)") : "";
                 _threadCells.Add(new ChartCell($"t{i}", new StackedHistory(60, "User", "Kernel"))
                 {
-                    FixedMax = 100, Stroke = CpuBlue, Label = $"CPU {i}",
-                    Tip = $"Logical processor {i}" + (core >= 0 ? $" · core {core}{kind}" : ""),
+                    FixedMax = 100, Stroke = CpuBlue,
+                    // "C1" names the physical core, so SMT siblings (two logical CPUs on one core) share it.
+                    Label = $"CPU {i}" + (core >= 0 && smt ? $" · C{core}" : "") +
+                            (core >= 0 && _topology.Hybrid ? (_topology.CoreIsEfficiency[core] ? " · E" : " · P") : ""),
+                    Tip = $"Logical processor {i}" + (core >= 0 ? $" · core {core}{kind}" : "") +
+                          (core >= 0 && _topology.CoreThreads[core].Length > 1
+                              ? $"\nShares this core with CPU {string.Join(", ", _topology.CoreThreads[core].Where(t => t != i))} (hyper-threading)"
+                              : ""),
                 });
             }
             _coreCells.Clear();
