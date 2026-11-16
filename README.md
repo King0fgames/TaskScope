@@ -54,7 +54,7 @@ Get the latest version from [Releases](https://github.com/King0fgames/TaskScope/
 | File | What it is |
 | --- | --- |
 | `TaskScope-<version>-setup.exe` | Installer. Installs for your user without an admin prompt (or for all users if you choose), adds a Start menu entry and an uninstaller. |
-| `TaskScope-<version>-portable-win-x64.zip` | Portable version. Unzip anywhere and run `TaskScope.exe`. |
+| `TaskScope-<version>-portable.exe` | Portable version. A single exe: put it anywhere and run it, nothing to install. |
 
 Requires Windows 10 or 11, x64. The builds aren't code-signed yet, so Windows SmartScreen may warn the first time: choose **More info**, then **Run anyway**. Settings are kept in `%AppData%\TaskScope` either way, and the uninstaller leaves them in place.
 
