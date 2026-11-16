@@ -86,6 +86,7 @@ public partial class MainWindow : Window
         _tick++;
         _lastSys = snap.Sys;
         Row.MemScale = Math.Max(GB, snap.Sys.PhysTotal / 4.0);
+        Row.GpuIndex = snap.Sys.Gpus.ToDictionary(a => a.Luid, a => a.Index);
 
         foreach (var s in snap.Procs)
         {
@@ -163,14 +164,14 @@ public partial class MainWindow : Window
         if (s.GpuAvailable)
         {
             GpuValue.Text = Fmt.Pct(s.Gpu);
-            GpuSub.Text = $"{Fmt.Bytes(s.GpuMem)} dedicated memory in use";
+            GpuSub.Text = GpuTileSub(s);
         }
         else { GpuValue.Text = "n/a"; GpuSub.Text = "GPU counters unavailable"; }
 
         DiskValue.Text = Fmt.Rate(s.Disk);
         DiskSub.Text = s.Disks.Count > 0 ? $"{s.Disks.Count} disk{(s.Disks.Count == 1 ? "" : "s")} · busiest {s.Disks.Max(d => d.Active):0}% active"
                                          : "read + write, all processes";
-        if (s.Gpus.Count > 1) GpuSub.Text = $"{s.Gpus.Count} GPUs · {Fmt.Bytes(s.GpuMem)} dedicated in use";
+
 
         // The open tile gets an accent outline (the commit tile stays red while memory is low).
         var accent = TryFindResource("AccentFillColorDefaultBrush") as Brush ?? Brushes.DodgerBlue;
@@ -182,6 +183,15 @@ public partial class MainWindow : Window
         }
 
         CpuSpark.Refresh(); MemSpark.Refresh(); CommitSpark.Refresh(); GpuSpark.Refresh(); DiskSpark.Refresh();
+    }
+
+    /// <summary>"3D 12% · 1.2 / 8.0 GB dedicated": the busiest engine type and dedicated memory.</summary>
+    static string GpuTileSub(SystemSample s)
+    {
+        string mem = s.GpuMemTotal > 0 ? $"{Fmt.Bytes(s.GpuMem)} / {Fmt.Bytes(s.GpuMemTotal)} dedicated" : $"{Fmt.Bytes(s.GpuMem)} dedicated";
+        if (s.Gpus.Count > 1) return $"{s.Gpus.Count} GPUs · {mem}";
+        var busiest = s.Gpus.SelectMany(a => a.Engines).Where(e => e.Value >= 0.05).OrderByDescending(e => e.Value).FirstOrDefault();
+        return busiest.Key == null ? mem : $"{busiest.Key} {Fmt.Pct(busiest.Value)} · {mem}";
     }
 
     // ───────────────────────── alerts ─────────────────────────
@@ -272,6 +282,8 @@ public partial class MainWindow : Window
             "Disk" => a.Disk.CompareTo(b.Disk),
             "Gpu" => a.Gpu.CompareTo(b.Gpu),
             "GpuMem" => a.GpuMem.CompareTo(b.GpuMem),
+            "GpuShared" => a.GpuShared.CompareTo(b.GpuShared),
+            "GpuEngine" => string.CompareOrdinal(a.GpuEngineText, b.GpuEngineText) is int e && e != 0 ? e : a.Gpu.CompareTo(b.Gpu),
             "Threads" => a.Threads.CompareTo(b.Threads),
             "Handles" => a.Handles.CompareTo(b.Handles),
             _ => 0,
@@ -368,6 +380,7 @@ public partial class MainWindow : Window
         }
         DPath.ToolTip = DPath.Text;
         UpdateCpuUse(r);
+        UpdateGpuUse(r);
         DCpu.Data = r.CpuHist; DMem.Data = r.MemHist;
         DCpu.Refresh(); DMem.Refresh();
         DCpuVal.Text = r.CpuText; DMemVal.Text = r.PrivateText;

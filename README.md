@@ -16,16 +16,16 @@ Windows can run out of **commit** (memory that programs have reserved, backed by
 
 **Detail panels and graphs** (click any tile)
 - **CPU**: *Overall*, *Cores* (physical cores, marked **P**/**E** on hybrid Intel CPUs), or *Threads* (one graph per logical processor). If the selected process is limited to certain CPUs (affinity), those CPUs are outlined.
-- **GPU**: *Overall*, or *Per GPU* with each adapter's name, usage and dedicated memory (used / total).
+- **GPU**: *Overall*; *Engines*, one graph per engine type on each GPU (3D, Copy, Video Encode, Video Decode, plus Compute and others once they get busy), like Task Manager; *Per GPU* with each adapter's name, busiest engine, and dedicated and shared memory (used / total); and *Memory*, dedicated and shared GPU memory graphs per GPU. The tile shows the busiest engine type and dedicated memory in use.
 - **Disks**: one card per physical disk with active time, read and write speed.
 - **Memory / Commit**: a large graph plus the top apps right now.
-- **Stacked graphs** toggle: every graph becomes a stacked, color-coded chart. Tile and large graphs are split by the top apps (with "Other" in gray), CPU core/thread graphs by user vs. kernel time, disk graphs by reads vs. writes, and per-GPU graphs by app, with the same colors as the GPU legend.
+- **Stacked graphs** toggle: every graph becomes a stacked, color-coded chart. Tile and large graphs are split by the top apps (with "Other" in gray), CPU core/thread graphs by user vs. kernel time, disk graphs by reads vs. writes, and per-GPU and per-engine graphs by app, with the same colors as the GPU legend.
 
 **Better process list**
 - Every process is read in a single `NtQuerySystemInformation` call, so updates are cheap even with hundreds of processes.
 - Group by app, with expandable groups, or a flat list.
 - **Cores** column: CPU use expressed in cores (2.5 = as busy as two and a half logical processors). The details pane adds how many of the process's threads are actually busy and which CPUs it may run on.
-- Columns: CPU, committed memory, RAM (working set), disk I/O, GPU %, GPU memory, threads, handles, and a **Suspended** status (detected from thread wait states).
+- Columns: CPU, committed memory, RAM (working set), disk I/O, GPU %, **GPU engine** (the engine the process uses most, e.g. 3D or Video Decode), dedicated and shared GPU memory, threads, handles, and a **Suspended** status (detected from thread wait states). The details pane breaks a process's GPU use down by engine.
 - Search by name, PID, path, **or command line**, so you can tell your `python.exe` processes apart.
 - A details pane with path, full command line, parent process, start time, priority, CPU affinity (with a **Change…** link), and 2-minute CPU and memory graphs.
 - Heat shading on busy cells, and live tiles for CPU, RAM, commit, GPU and disk.
@@ -76,7 +76,7 @@ Settings (warning threshold, update speed, memory watches, window position) are 
 
 | File | What it does |
 | --- | --- |
-| `Sampler.cs` | Process snapshot via `NtQuerySystemInformation(SystemProcessInformation)` (including per-thread CPU time for busy-thread counts), per-processor CPU (`SystemProcessorPerformanceInformation`), core topology and P/E cores (`GetLogicalProcessorInformationEx`), GPU usage per process and per adapter (PDH `GPU Engine` / `GPU Process Memory` / `GPU Adapter Memory`, names from DXGI), per-disk I/O (PDH `PhysicalDisk`) |
+| `Sampler.cs` | Process snapshot via `NtQuerySystemInformation(SystemProcessInformation)` (including per-thread CPU time for busy-thread counts), per-processor CPU (`SystemProcessorPerformanceInformation`), core topology and P/E cores (`GetLogicalProcessorInformationEx`), GPU usage per process, per adapter and per engine type, dedicated and shared GPU memory (PDH `GPU Engine` / `GPU Process Memory` / `GPU Adapter Memory`, names and memory sizes from DXGI), per-disk I/O (PDH `PhysicalDisk`) |
 | `Charts.cs` | Graph control (line or stacked), per-app stacked history, chart palette |
 | `MainWindow.Panel.cs` | Detail panel: CPU cores/threads, per-GPU, per-disk, legends, affinity |
 | `Models.cs` | Row view models (process and app group), formatting, heat shading |
