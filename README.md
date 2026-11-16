@@ -15,7 +15,7 @@ Windows can run out of **commit** (memory that programs have reserved, backed by
 - **Set affinity…** (right-click menu, or **Change…** in the details pane) picks which logical processors a process, or every process in a group, may run on. Checkboxes are grouped by physical core and marked P/E on hybrid CPUs, with shortcuts for P-cores only, E-cores only, and one thread per core. On PCs with more than 64 logical processors, affinity is set within the process's processor group.
 
 **Detail panels and graphs** (click any tile)
-- **CPU**: *Overall*, *Cores* (physical cores, marked **P**/**E** on hybrid Intel CPUs), or *Threads* (one graph per logical processor). If the selected process is limited to certain CPUs (affinity), those CPUs are outlined.
+- **CPU**: *Overall*, *Cores* (physical cores, marked **P**/**E** on hybrid Intel CPUs), or *Threads* (one graph per logical processor, titled with its core, e.g. "CPU 2 · C1", and P/E on hybrid CPUs, so hyper-threading siblings are easy to spot). If the selected process is limited to certain CPUs (affinity), those CPUs are outlined.
 - **GPU**: *Overall*; *Engines*, one graph per engine type on each GPU (3D, Copy, Video Encode, Video Decode, plus Compute and others once they get busy), like Task Manager; *Per GPU* with each adapter's name, busiest engine, and dedicated and shared memory (used / total); and *Memory*, dedicated and shared GPU memory graphs per GPU. The tile shows the busiest engine type and dedicated memory in use.
 - **Disks**: one card per physical disk with active time, read and write speed.
 - **Memory / Commit**: a large graph plus the top apps right now.
@@ -47,10 +47,24 @@ Windows can run out of **commit** (memory that programs have reserved, backed by
 | `Space` | Freeze/unfreeze the list (graphs keep running) |
 | `→` / `←` | Expand / collapse a group |
 
-## Requirements
+## Download
+
+Get the latest version from [Releases](https://github.com/King0fgames/TaskScope/releases/latest). Both downloads include everything they need, so you don't have to install .NET.
+
+| File | What it is |
+| --- | --- |
+| `TaskScope-<version>-setup.exe` | Installer. Installs for your user without an admin prompt (or for all users if you choose), adds a Start menu entry and an uninstaller. |
+| `TaskScope-<version>-portable-win-x64.zip` | Portable version. Unzip anywhere and run `TaskScope.exe`. |
+
+Requires Windows 10 or 11, x64. The builds aren't code-signed yet, so Windows SmartScreen may warn the first time: choose **More info**, then **Run anyway**. Settings are kept in `%AppData%\TaskScope` either way, and the uninstaller leaves them in place.
+
+To make a release, push a tag like `v1.0.0`. The [Release workflow](.github/workflows/release.yml) builds both downloads with checksums and creates a draft release.
+
+## Requirements to build
 
 - Windows 10 or 11, x64
-- [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (to run) or the .NET 10 SDK (to build)
+- .NET 10 SDK
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php), only to build the installer (`installer/TaskScope.iss`)
 
 ## Build and run
 
